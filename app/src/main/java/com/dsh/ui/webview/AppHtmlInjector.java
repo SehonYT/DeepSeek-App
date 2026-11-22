@@ -1,0 +1,101 @@
+package com.dsh.ui.webview;
+
+import android.util.Log;
+
+import com.dsh.bridge.AndroidBridge;
+import com.dsh.theme.ThemeManager;
+
+import org.json.JSONObject;
+
+/** Injects the boot config and the startup_ready script ahead of the app UI. */
+public final class AppHtmlInjector {
+
+    private static final String TAG = "WebViewHost";
+
+    /** Web layer generates the ready signal under generated/patches. */
+    private static final String READY_SCRIPT = "./generated/patches/startup_ready.js";
+    private static final String CSP = "default-src 'self' https: data: blob:; "
+            + "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data:; "
+            + "style-src 'self' 'unsafe-inline' https:; "
+            + "img-src 'self' https: data: blob:; font-src 'self' https: data:; "
+            + "connect-src 'self' https: http: wss: ws: data: blob:; "
+            + "frame-src 'self' https: http: data: blob:; "
+            + "worker-src 'self' blob: data:; object-src 'none'; base-uri 'self'";
+
+    private AppHtmlInjector() {
+    }
+
+    public static String inject(String html, AndroidBridge bridge, ThemeManager theme) {
+        return inject(html, bridge, theme, false);
+    }
+
+    public static String inject(String html, AndroidBridge bridge, ThemeManager theme, boolean isDesktop) {
+        if (isDesktop && html != null) {
+            html = html.replace(
+                    "content=\"width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0\"",
+                    "content=\"width=1024, initial-scale=0.75, minimum-scale=0.25, maximum-scale=3.0, user-scalable=yes, viewport-fit=cover\"");
+        }
+        String boot;
+        try {
+            JSONObject config = new JSONObject(bridge.getConfig());
+            JSONObject endpoints = new JSONObject();
+            String base = bridge.getEngineBaseUrl();
+            endpoints.put("core", base);
+            endpoints.put("core_http", base);
+            endpoints.put("enginePort", bridge.getEnginePort());
+            boot = "<meta http-equiv=\"Content-Security-Policy\" content=\"" + CSP + "\">"
+                    + "<script>(function(){"
+                    + "window.__APP_CONFIG__=" + config.toString() + ";"
+                    + "window.__AG_ENDPOINTS__=" + endpoints.toString() + ";"
+                    + "window.__AG_CSRF__=" + JSONObject.quote(bridge.getCsrfToken()) + ";"
+                    + "window.__AG_HOST_THEME__="
+                    + JSONObject.quote(theme != null && theme.mode() == com.dsh.theme.ThemeColors.MODE_DARK ? "dark"
+                            : (theme != null && theme.mode() == com.dsh.theme.ThemeColors.MODE_LIGHT ? "light" : "system")) + ";"
+                    + "window.__AG_RESOLVED_THEME__="
+                    + JSONObject.quote(theme != null ? theme.getTheme() : "light") + ";"
+                    + "window.__AG_NATIVE_BRIDGE_TOKEN__="
+                    + JSONObject.quote(bridge.getBlobBridgeToken()) + ";"
+                    + "window.AndroidBridge=window.Android;"
+                    + "window.dialog={showOpenDialog:function(){return new Promise(function(resolve){window.__onDirectoryPicked=function(path){resolve(path);};if(window.Android&&typeof window.Android.openDirectoryPicker==='function'){window.Android.openDirectoryPicker();}else{resolve(null);}});}};"
+                    + "try{"
+                    + "if(navigator.permissions&&navigator.permissions.query){"
+                    + "var _origQ=navigator.permissions.query.bind(navigator.permissions);"
+                    + "navigator.permissions.query=function(d){"
+                    + "if(d&&d.name==='microphone'){return Promise.resolve({name:'microphone',state:'granted',onchange:null});}"
+                    + "return _origQ(d);"
+                    + "};}"
+                    + "if(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia){"
+                    + "var _origG=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);"
+                    + "navigator.mediaDevices.getUserMedia=function(c){"
+                    + "var cl=c;"
+                    + "if(c&&typeof c==='object'){"
+                    + "cl=Object.assign({},c);"
+                    + "if(cl.audio&&typeof cl.audio==='object'){"
+                    + "cl.audio=Object.assign({},cl.audio);"
+                    + "delete cl.audio.voiceIsolation;"
+                    + "}"
+                    + "}"
+                    + "return _origG(cl).catch(function(err){"
+                    + "if(err&&(err.name==='NotReadableError'||err.name==='OverconstrainedError'||err.name==='AbortError')){"
+                    + "return new Promise(function(res){setTimeout(res,180);}).then(function(){return _origG({audio:true});});"
+                    + "}"
+                    + "throw err;"
+                    + "});"
+                    + "};}"
+                    + "}catch(e){console.warn('media polyfill error',e);}"
+                    + "})();</script>"
+                    // Signals first paint back to native (AndroidBridge.onUiReady)
+                    // so the splash is dismissed on real content, not a timer.
+                    + "<script src=\"" + READY_SCRIPT + "\"></script>";
+        } catch (Exception e) {
+            Log.w(TAG, "config injection failed", e);
+            return html;
+        }
+        int head = html.indexOf("<head>");
+        if (head >= 0) {
+            int at = head + "<head>".length();
+            return html.substring(0, at) + "\n" + boot + html.substring(at);
+        }
+        return boot + html;
+    }
+}
