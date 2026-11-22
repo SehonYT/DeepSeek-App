@@ -42,7 +42,12 @@ public final class CoreEnvironment {
                 + " appDataDir=" + rm.getAppDataDir().getAbsolutePath()
                 + " projectsDir=" + rm.getProjectsDir().getAbsolutePath()
                 + " TMPDIR=" + rm.appContext().getCacheDir().getAbsolutePath());
-        env.put("SSL_CERT_FILE", rm.getCertFile().getAbsolutePath());
+        File certFile = rm.getCertFile();
+        if (certFile != null && certFile.exists()) {
+            env.put("SSL_CERT_FILE", certFile.getAbsolutePath());
+            env.put("NODE_EXTRA_CA_CERTS", certFile.getAbsolutePath());
+            env.put("CURL_CA_BUNDLE", certFile.getAbsolutePath());
+        }
         String inheritedPath = env.get("PATH");
 
         // The core's PTY spawner uses $SHELL (or falls back to /bin/bash, which

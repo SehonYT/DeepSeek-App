@@ -17,7 +17,8 @@ public final class RuntimePaths {
 
     public static final String BIN_DIR = "runtime/bin";
     public static final String LIB_DIR = "runtime/lib";
-    public static final String CERT_REL = "runtime/certs/ca-certificates.crt";
+    public static final String CERT_REL = "usr/etc/tls/cert.pem";
+    public static final String CERT_REL_FALLBACK = "runtime/certs/ca-certificates.crt";
     public static final String LOADER_NAME = "libloader.so";
     public static final String CORE_NAME = "liblanguage_server.so";
 
@@ -54,7 +55,15 @@ public final class RuntimePaths {
     }
 
     public File getCertFile() {
-        return new File(appContext.getFilesDir(), CERT_REL);
+        File primary = new File(appContext.getFilesDir(), CERT_REL);
+        if (primary.exists()) {
+            return primary;
+        }
+        File fallback = new File(appContext.getFilesDir(), CERT_REL_FALLBACK);
+        if (fallback.exists()) {
+            return fallback;
+        }
+        return primary;
     }
 
     public File getGeminiDir() {

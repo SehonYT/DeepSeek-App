@@ -96,6 +96,21 @@ public final class CoreInstaller {
         // no recursive chmod is needed on a warm launch.
         rm.writeNetworkConfig();
         rm.startNetworkMonitor();
+        // Ensure CA certificates are mirrored across expected legacy and prefix paths
+        File certSrc = new File(ctx.getFilesDir(), "usr/etc/tls/cert.pem");
+        if (certSrc.exists()) {
+            File rtCerts = new File(ctx.getFilesDir(), "runtime/certs");
+            if (!rtCerts.exists()) {
+                rtCerts.mkdirs();
+            }
+            File rtCertFile = new File(rtCerts, "ca-certificates.crt");
+            if (!rtCertFile.exists()) {
+                try {
+                    java.nio.file.Files.copy(certSrc.toPath(), rtCertFile.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                } catch (Exception ignored) {
+                }
+            }
+        }
         OnboardingSeeder.seed(ctx, rm.getAppDataDir(), rm.getProjectsDir());
         // Always ensure fallback shells and open-url shims are installed
         // in runtime/bin immediately regardless of whether the bionic prefix is extracted.
