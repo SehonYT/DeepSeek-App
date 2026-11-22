@@ -15,6 +15,8 @@ RUNNER_DIR = os.path.dirname(os.path.abspath(__file__))
 MODULES_DIR = os.path.dirname(RUNNER_DIR)
 PROJECT_ROOT = os.path.dirname(MODULES_DIR)
 
+DEFAULT_DIRECT_URL = "https://github.com/salmanbappi/deepseek-harness/releases/download/v0.2.2-rc.3/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz"
+
 
 def sha256_file(path):
     h = hashlib.sha256()
@@ -25,36 +27,31 @@ def sha256_file(path):
 
 
 def find_prebuilt_archive():
-    # 1. Search in project vendor/ or archives/
     candidates = []
     for search_dir in [
-        os.path.join(PROJECT_ROOT, "vendor"),
         os.path.join(PROJECT_ROOT, "archives"),
+        os.path.join(PROJECT_ROOT, "vendor"),
         os.path.expanduser("~/workspace/archives"),
         os.path.expanduser("~/deepseek-harness"),
     ]:
         if os.path.isdir(search_dir):
-            candidates.extend(glob.glob(os.path.join(search_dir, "dsh-termux-prebuilt-*.tar.gz")))
+            candidates.extend(glob.glob(os.path.join(search_dir, "*dsh*prebuilt*.tar.gz")))
+            candidates.extend(glob.glob(os.path.join(search_dir, "dsh*.tar.gz")))
     if candidates:
         return candidates[0]
     return None
 
 
 def download_prebuilt_archive(target_path):
-    print("[*] Fetching prebuilt DeepSeek Harness Termux release info from GitHub...")
-    api_url = "https://api.github.com/repos/salmanbappi/deepseek-harness/releases/latest"
-    req = urllib.request.Request(api_url, headers={"User-Agent": "DeepSeek-App-Builder"})
+    print(f"[*] Downloading prebuilt bundle from {DEFAULT_DIRECT_URL}...")
+    req = urllib.request.Request(DEFAULT_DIRECT_URL, headers={"User-Agent": "DeepSeek-App-Builder"})
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            for asset in data.get("assets", []):
-                if asset["name"].startswith("dsh-termux-prebuilt") and asset["name"].endswith(".tar.gz"):
-                    download_url = asset["browser_download_url"]
-                    print(f"[*] Downloading {asset['name']} from {download_url}...")
-                    urllib.request.urlretrieve(download_url, target_path)
-                    return True
+        with urllib.request.urlopen(req, timeout=60) as resp, open(target_path, "wb") as out:
+            shutil.copyfileobj(resp, out)
+        print(f"[OK] Downloaded prebuilt bundle -> {target_path}")
+        return True
     except Exception as e:
-        print(f"[!] Release download failed: {e}")
+        print(f"[!] Direct download failed: {e}")
     return False
 
 
@@ -69,7 +66,6 @@ def prepare(dest_runtime_dir: str) -> bool:
 
     archive = find_prebuilt_archive()
     if not archive or not os.path.isfile(archive):
-        # Attempt download
         tmp_archive = os.path.join(dest_runtime_dir, "dsh-prebuilt.tar.gz")
         if download_prebuilt_archive(tmp_archive):
             archive = tmp_archive
@@ -80,7 +76,6 @@ def prepare(dest_runtime_dir: str) -> bool:
             tar.extractall(path=dsh_dest)
         print("[OK] Extracted prebuilt bundle.")
     else:
-        # Fallback: copy from local checkout if present
         local_dsh = os.path.expanduser("~/deepseek-harness")
         if os.path.isdir(local_dsh):
             print(f"[*] Copying runtime from local checkout {local_dsh} -> {dsh_dest}...")

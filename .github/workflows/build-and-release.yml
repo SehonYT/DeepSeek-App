@@ -84,7 +84,7 @@ jobs:
         run: |
           mkdir -p archives
           echo "[CI] Fetching prebuilt DeepSeek Harness Termux release..."
-          curl -fsSL -o archives/dsh-termux-prebuilt.tar.gz "https://github.com/salmanbappi/deepseek-harness/releases/download/v0.2.2-rc.3/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz" || true
+          curl -fsSL -o archives/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz "https://github.com/salmanbappi/deepseek-harness/releases/download/v0.2.2-rc.3/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz"
           ls -lh archives/
 
       - name: Build DeepSeek Release APK (dist/deepseek.apk)
