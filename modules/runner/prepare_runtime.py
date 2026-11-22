@@ -111,31 +111,32 @@ def prepare(dest_runtime_dir: str) -> bool:
     os.makedirs(dest_runtime_dir, exist_ok=True)
     dsh_tar = os.path.join(dest_runtime_dir, "dsh.tar.gz")
 
-    dsh_source = find_dsh_source()
-    if dsh_source and os.path.isdir(dsh_source):
-        print(f"[*] Packaging dsh-source {dsh_source} -> {dsh_tar}...")
-        subprocess.check_call(["tar", "-czf", dsh_tar, "-C", dsh_source, "."])
-        print(f"[OK] Packaged dsh.tar.gz ({os.path.getsize(dsh_tar) / (1024*1024):.2f} MB)")
+    archive = find_prebuilt_archive()
+    if archive and os.path.isfile(archive):
+        print(f"[*] Copying assembled prebuilt archive {archive} -> {dsh_tar}...")
+        shutil.copy2(archive, dsh_tar)
+        print(f"[OK] Staged dsh.tar.gz ({os.path.getsize(dsh_tar) / (1024*1024):.2f} MB)")
     else:
-        archive = find_prebuilt_archive()
-        if not archive or not os.path.isfile(archive):
+        dsh_source = find_dsh_source()
+        if dsh_source and os.path.isdir(dsh_source):
+            print(f"[*] Packaging dsh-source {dsh_source} -> {dsh_tar}...")
+            subprocess.check_call(["tar", "-czf", dsh_tar, "-C", dsh_source, "."])
+            print(f"[OK] Packaged dsh.tar.gz ({os.path.getsize(dsh_tar) / (1024*1024):.2f} MB)")
+        else:
             tmp_archive = os.path.join(dest_runtime_dir, "dsh-prebuilt.tar.gz")
             if download_prebuilt_archive(tmp_archive):
                 archive = tmp_archive
-
-        if archive and os.path.isfile(archive):
-            print(f"[*] Copying prebuilt archive {archive} -> {dsh_tar}...")
-            shutil.copy2(archive, dsh_tar)
-            print(f"[OK] Staged dsh.tar.gz ({os.path.getsize(dsh_tar) / (1024*1024):.2f} MB)")
-        else:
-            local_dsh = os.path.expanduser("~/deepseek-harness")
-            if os.path.isdir(local_dsh):
-                print(f"[*] Packaging local checkout {local_dsh} -> {dsh_tar}...")
-                subprocess.check_call(["tar", "-czf", dsh_tar, "-C", local_dsh, "."])
-                print("[OK] Packaged local runtime files.")
+                shutil.copy2(archive, dsh_tar)
+                print(f"[OK] Staged downloaded dsh.tar.gz ({os.path.getsize(dsh_tar) / (1024*1024):.2f} MB)")
             else:
-                print("[ERROR] No dsh-source, prebuilt archive, or local deepseek-harness found!")
-                return False
+                local_dsh = os.path.expanduser("~/deepseek-harness")
+                if os.path.isdir(local_dsh):
+                    print(f"[*] Packaging local checkout {local_dsh} -> {dsh_tar}...")
+                    subprocess.check_call(["tar", "-czf", dsh_tar, "-C", local_dsh, "."])
+                    print("[OK] Packaged local runtime files.")
+                else:
+                    print("[ERROR] No dsh-source, prebuilt archive, or local deepseek-harness found!")
+                    return False
 
     manifest_path = os.path.join(dest_runtime_dir, "manifest.json")
     with open(manifest_path, "w", encoding="utf-8") as f:

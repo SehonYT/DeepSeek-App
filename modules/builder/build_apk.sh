@@ -105,7 +105,11 @@ python3 "$SCRIPT_DIR/align.py" "$BUILD_DIR/unaligned.apk" "$BUILD_DIR/aligned.ap
 
 # Phase 08: Sign and Verify APK
 echo -e "\n>>> [8/8] Signing and Verifying APK..."
-bash "$SCRIPT_DIR/08_sign.sh" "$BUILD_DIR/aligned.apk" "$OUT_APK" "$TOOLS_DIR/debug.keystore"
+SIGN_KEYSTORE="$TOOLS_DIR/release.keystore"
+if [ ! -f "$SIGN_KEYSTORE" ]; then
+    SIGN_KEYSTORE="$TOOLS_DIR/debug.keystore"
+fi
+bash "$SCRIPT_DIR/08_sign.sh" "$BUILD_DIR/aligned.apk" "$OUT_APK" "$SIGN_KEYSTORE" "salman2005" "salman2005" "salman2005"
 bash "$SCRIPT_DIR/09_verify.sh" "$OUT_APK"
 
 echo "============================================================"
