@@ -10,7 +10,8 @@ cache/
 tools/android.jar
 tools/r8.jar
 tools/debug.keystore
-vendor/
+vendor/*
+!vendor/native/
 
 # Archives and binaries
 *.tar

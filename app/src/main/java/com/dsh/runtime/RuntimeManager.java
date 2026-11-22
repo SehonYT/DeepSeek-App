@@ -72,6 +72,10 @@ public final class RuntimeManager {
         return paths.getGeminiDir();
     }
 
+    public File getDshHome() {
+        return paths.getDshHome();
+    }
+
     public File getAppDataDir() {
         return paths.getAppDataDir();
     }
@@ -106,9 +110,12 @@ public final class RuntimeManager {
         File bashBin = new File(prefix, com.dsh.install.EnvPaths.BASH_REL);
         File dshScript = new File(getRuntimeDir(), "dsh/apps/cli/lib/bin.js");
         if (!dshScript.isFile()) {
-            File altScript = new File(filesDir, "runtime/apps/cli/lib/bin.js");
-            if (altScript.isFile()) {
-                dshScript = altScript;
+            File altScript1 = new File(filesDir, "runtime/apps/cli/lib/bin.js");
+            File altScript2 = new File(filesDir, "dsh/apps/cli/lib/bin.js");
+            if (altScript1.isFile()) {
+                dshScript = altScript1;
+            } else if (altScript2.isFile()) {
+                dshScript = altScript2;
             }
         }
         int port = getHttpsPort();

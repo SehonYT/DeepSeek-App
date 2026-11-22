@@ -10,6 +10,7 @@ import tarfile
 import urllib.request
 import json
 import hashlib
+import subprocess
 
 RUNNER_DIR = os.path.dirname(os.path.abspath(__file__))
 MODULES_DIR = os.path.dirname(RUNNER_DIR)
@@ -20,10 +21,38 @@ DEFAULT_DIRECT_URL = "https://github.com/salmanbappi/deepseek-harness/releases/d
 
 def sha256_file(path):
     h = hashlib.sha256()
-    with open(path, "rb") as f:
-        while chunk := f.read(65536):
-            h.update(chunk)
-    return h.hexdigest()
+    try:
+        if os.path.islink(path):
+            try:
+                with open(path, "rb") as f:
+                    while chunk := f.read(65536):
+                        h.update(chunk)
+                return h.hexdigest()
+            except (OSError, IOError):
+                target = os.readlink(path).encode("utf-8")
+                return hashlib.sha256(target).hexdigest()
+        with open(path, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception as e:
+        print(f"[!] Warning: failed to hash {path}: {e}")
+        return None
+
+
+def find_dsh_source():
+    candidates = [
+        os.path.join(PROJECT_ROOT, "archives", "dsh-source"),
+        os.path.join(PROJECT_ROOT, "dsh-source"),
+        os.path.expanduser("~/workspace/archives/dsh-source"),
+    ]
+    for c in candidates:
+        if os.path.isdir(c) and (
+            os.path.exists(os.path.join(c, "apps"))
+            or os.path.exists(os.path.join(c, "package.json"))
+        ):
+            return c
+    return None
 
 
 def find_prebuilt_archive():
@@ -55,6 +84,24 @@ def download_prebuilt_archive(target_path):
     return False
 
 
+def extract_archive(archive_path: str, dest_dir: str) -> bool:
+    print(f"[*] Extracting prebuilt bundle {archive_path} -> {dest_dir} (preserving symlinks)...")
+    if shutil.which("tar"):
+        res = subprocess.run(["tar", "-xzf", archive_path, "-C", dest_dir], capture_output=True, text=True)
+        if res.returncode == 0:
+            print("[OK] Extracted prebuilt bundle using system tar.")
+            return True
+        print(f"[!] System tar failed ({res.stderr.strip()}), falling back to tarfile")
+
+    with tarfile.open(archive_path, "r:gz") as tar:
+        if hasattr(tarfile, 'tar_filter'):
+            tar.extractall(path=dest_dir, filter='tar')
+        else:
+            tar.extractall(path=dest_dir)
+    print("[OK] Extracted prebuilt bundle using tarfile.")
+    return True
+
+
 def prepare(dest_runtime_dir: str) -> bool:
     print("=" * 60)
     print("  PREPARING DEEPSEEK HARNESS RUNTIME")
@@ -64,32 +111,48 @@ def prepare(dest_runtime_dir: str) -> bool:
     dsh_dest = os.path.join(dest_runtime_dir, "dsh")
     os.makedirs(dsh_dest, exist_ok=True)
 
-    archive = find_prebuilt_archive()
-    if not archive or not os.path.isfile(archive):
-        tmp_archive = os.path.join(dest_runtime_dir, "dsh-prebuilt.tar.gz")
-        if download_prebuilt_archive(tmp_archive):
-            archive = tmp_archive
-
-    if archive and os.path.isfile(archive):
-        print(f"[*] Extracting prebuilt bundle {archive} -> {dsh_dest}...")
-        with tarfile.open(archive, "r:gz") as tar:
-            tar.extractall(path=dsh_dest)
-        print("[OK] Extracted prebuilt bundle.")
+    dsh_source = find_dsh_source()
+    if dsh_source:
+        print(f"[*] Copying runtime from dsh-source {dsh_source} -> {dsh_dest} (preserving symlinks)...")
+        if os.path.exists(dsh_dest):
+            shutil.rmtree(dsh_dest)
+        os.makedirs(dsh_dest, exist_ok=True)
+        copied = False
+        if shutil.which("cp"):
+            res = subprocess.run(["cp", "-a", f"{dsh_source}/.", dsh_dest])
+            if res.returncode == 0:
+                copied = True
+        if not copied:
+            shutil.copytree(dsh_source, dsh_dest, symlinks=True, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
+        git_dir = os.path.join(dsh_dest, ".git")
+        if os.path.isdir(git_dir):
+            shutil.rmtree(git_dir, ignore_errors=True)
+        print("[OK] Copied dsh-source runtime files.")
     else:
-        local_dsh = os.path.expanduser("~/deepseek-harness")
-        if os.path.isdir(local_dsh):
-            print(f"[*] Copying runtime from local checkout {local_dsh} -> {dsh_dest}...")
-            for rel in ["apps", "packages", "package.json", "pnpm-workspace.yaml"]:
-                src = os.path.join(local_dsh, rel)
-                dst = os.path.join(dsh_dest, rel)
-                if os.path.isdir(src):
-                    shutil.copytree(src, dst, dirs_exist_ok=True)
-                elif os.path.isfile(src):
-                    shutil.copy2(src, dst)
-            print("[OK] Copied local runtime files.")
+        archive = find_prebuilt_archive()
+        if not archive or not os.path.isfile(archive):
+            tmp_archive = os.path.join(dest_runtime_dir, "dsh-prebuilt.tar.gz")
+            if download_prebuilt_archive(tmp_archive):
+                archive = tmp_archive
+
+        if archive and os.path.isfile(archive):
+            if not extract_archive(archive, dsh_dest):
+                return False
         else:
-            print("[ERROR] No prebuilt archive or local deepseek-harness found!")
-            return False
+            local_dsh = os.path.expanduser("~/deepseek-harness")
+            if os.path.isdir(local_dsh):
+                print(f"[*] Copying runtime from local checkout {local_dsh} -> {dsh_dest}...")
+                for rel in ["apps", "packages", "package.json", "pnpm-workspace.yaml", "node_modules"]:
+                    src = os.path.join(local_dsh, rel)
+                    dst = os.path.join(dsh_dest, rel)
+                    if os.path.isdir(src):
+                        shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
+                    elif os.path.isfile(src):
+                        shutil.copy2(src, dst)
+                print("[OK] Copied local runtime files.")
+            else:
+                print("[ERROR] No dsh-source, prebuilt archive, or local deepseek-harness found!")
+                return False
 
     # Generate runtime manifest.json
     manifest = {}
@@ -97,8 +160,11 @@ def prepare(dest_runtime_dir: str) -> bool:
         for f in files:
             full_path = os.path.join(root, f)
             rel_path = os.path.relpath(full_path, dest_runtime_dir)
-            if rel_path != "manifest.json":
-                manifest[rel_path] = sha256_file(full_path)
+            if rel_path == "manifest.json":
+                continue
+            h = sha256_file(full_path)
+            if h is not None:
+                manifest[rel_path] = h
 
     manifest_path = os.path.join(dest_runtime_dir, "manifest.json")
     with open(manifest_path, "w", encoding="utf-8") as f:

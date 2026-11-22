@@ -27,6 +27,7 @@ public final class RuntimePaths {
      * projects under {@code $HOME/.gemini/config/projects}.
      */
     public static final String GEMINI_DIR = ".gemini";
+    public static final String DSH_DIR = ".dsh";
     public static final String APP_DATA_DIR_NAME = "deepseek-app";
     public static final String CONFIG_PROJECTS = "config/projects";
 
@@ -58,6 +59,10 @@ public final class RuntimePaths {
 
     public File getGeminiDir() {
         return new File(appContext.getFilesDir(), GEMINI_DIR);
+    }
+
+    public File getDshHome() {
+        return new File(appContext.getFilesDir(), DSH_DIR);
     }
 
     public File getAppDataDir() {

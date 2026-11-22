@@ -80,11 +80,42 @@ jobs:
             curl -fsSL -o tools/r8.jar "https://dl.google.com/dl/android/maven2/com/android/tools/r8/8.2.42/r8-8.2.42.jar"
           fi
 
-      - name: Fetch DeepSeek Harness Runtime Bundle
+      - name: Assemble DeepSeek Harness Runtime Bundle
         run: |
           mkdir -p archives
-          echo "[CI] Fetching prebuilt DeepSeek Harness Termux release..."
-          curl -fsSL -o archives/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz "https://github.com/salmanbappi/deepseek-harness/releases/download/v0.2.2-rc.3/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz"
+          echo "[CI] 1. Cloning deepseek-harness..."
+          git clone --depth 1 https://github.com/salmanbappi/deepseek-harness.git archives/dsh-source
+
+          echo "[CI] 2. Unpacking compiled lib prebuilt..."
+          curl -fsSL "https://github.com/salmanbappi/deepseek-harness/releases/download/v0.2.2-rc.3/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz" | tar -xz -C archives/dsh-source
+
+          echo "[CI] 3. Installing pnpm..."
+          npm install -g pnpm@11.28.5 || sudo npm install -g pnpm@11.28.5
+
+          echo "[CI] 4. Installing production dependencies..."
+          cd archives/dsh-source
+          pnpm install --prod --frozen-lockfile=false --ignore-scripts
+
+          echo "[CI] 5. Applying mobile patches..."
+          python3 scripts/patch_termux.py --apply || true
+
+          echo "[CI] 6. Installing sharp wasm32..."
+          mkdir -p node_modules/@img node_modules/@emnapi
+          curl -sL https://registry.npmjs.org/@img/sharp-wasm32/-/sharp-wasm32-0.35.5.tgz | tar -xz -C node_modules/@img
+          rm -rf node_modules/@img/sharp-wasm32 && mv node_modules/@img/package node_modules/@img/sharp-wasm32
+          curl -sL https://registry.npmjs.org/@emnapi/runtime/-/runtime-1.11.3.tgz | tar -xz -C node_modules/@emnapi
+          rm -rf node_modules/@emnapi/runtime && mv node_modules/@emnapi/package node_modules/@emnapi/runtime
+
+          echo "[CI] 7. Installing android-arm64 pty.node..."
+          find node_modules -type d -name node-pty -not -path '*/node-pty/*' -exec mkdir -p {}/prebuilds/android-arm64 \; -exec cp "$GITHUB_WORKSPACE/vendor/native/android-arm64/pty.node" {}/prebuilds/android-arm64/pty.node \;
+
+          echo "[CI] 8. Pruning LibreOffice WASM and test/dev bloat..."
+          find node_modules -maxdepth 6 \( -type d -o -type l \) -name 'libreoffice-kit-*' -prune -exec rm -rf {} + || true
+          rm -rf .git tests benchmarks docs
+
+          echo "[CI] 9. Repacking runtime archive..."
+          cd ../..
+          tar -czf archives/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz -C archives/dsh-source .
           ls -lh archives/
 
       - name: Sync App Version from Tag

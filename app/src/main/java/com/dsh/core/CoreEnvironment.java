@@ -24,7 +24,21 @@ public final class CoreEnvironment {
         // builds so the core always finds $HOME/.gemini (token, config, chats).
         env.put("HOME", files.getAbsolutePath());
         env.put("TMPDIR", rm.appContext().getCacheDir().getAbsolutePath());
+
+        // DSH_HOME points to filesDir/.dsh and must be created
+        File dshHome = rm.getDshHome();
+        if (!dshHome.exists()) {
+            dshHome.mkdirs();
+        }
+        env.put("DSH_HOME", dshHome.getAbsolutePath());
+
+        File dshData = new File(dshHome, "data");
+        if (!dshData.exists()) {
+            dshData.mkdirs();
+        }
+        env.put("DSH_DATA", dshData.getAbsolutePath());
         Log.i(TAG, "core env: HOME=" + files.getAbsolutePath()
+                + " DSH_HOME=" + dshHome.getAbsolutePath()
                 + " appDataDir=" + rm.getAppDataDir().getAbsolutePath()
                 + " projectsDir=" + rm.getProjectsDir().getAbsolutePath()
                 + " TMPDIR=" + rm.appContext().getCacheDir().getAbsolutePath());
@@ -77,11 +91,22 @@ public final class CoreEnvironment {
         env.put("NODE_ENV", "production");
         env.put("DEEPSEEK_HOST", "127.0.0.1");
         env.put("DEEPSEEK_PORT", String.valueOf(rm.getHttpsPort()));
+        env.put("DSH_TELEMETRY_DISABLED", "1");
+
+        // NODE_PATH: Ensure Node resolves modules from both root dsh and apps/cli
         File dshDir = new File(rm.getRuntimeDir(), "dsh");
-        File nodeModules = new File(dshDir, "node_modules");
-        if (nodeModules.isDirectory()) {
-            env.put("NODE_PATH", nodeModules.getAbsolutePath());
+        File rootNodeModules = new File(dshDir, "node_modules");
+        File cliNodeModules = new File(dshDir, "apps/cli/node_modules");
+        String dshNodePath = rootNodeModules.getAbsolutePath() + ":" + cliNodeModules.getAbsolutePath();
+        File prefixNodeModules = new File(prefix, "lib/node_modules");
+        if (prefixNodeModules.isDirectory()) {
+            dshNodePath += ":" + prefixNodeModules.getAbsolutePath();
         }
+        String inheritedNodePath = env.get("NODE_PATH");
+        if (inheritedNodePath != null && !inheritedNodePath.isEmpty()) {
+            dshNodePath += ":" + inheritedNodePath;
+        }
+        env.put("NODE_PATH", dshNodePath);
 
         // Configure browser and desktop environment so core OAuth/open tools find the browser
         File xdgOpen = new File(bin, "xdg-open");
