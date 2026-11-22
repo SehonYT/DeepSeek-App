@@ -35,8 +35,17 @@ public final class CoreInstaller {
             Log.i(TAG, "extracting assets/runtime (first launch or runtime update)");
             try {
                 wipe(rm, runtimeDir);
-                AssetUnpacker.unpackTree(ctx.getAssets(), RuntimePaths.RUNTIME_ASSET, runtimeDir);
-            } catch (IOException e) {
+                if (hasAsset(ctx, "runtime/dsh.tar.gz")) {
+                    Log.i(TAG, "unpacking runtime/dsh.tar.gz bundle into runtime/dsh");
+                    File dshDir = new File(runtimeDir, "dsh");
+                    if (!dshDir.exists()) {
+                        dshDir.mkdirs();
+                    }
+                    com.dsh.install.BootstrapExtractor.extract(ctx.getAssets(), "runtime/dsh.tar.gz", dshDir);
+                } else {
+                    AssetUnpacker.unpackTree(ctx.getAssets(), RuntimePaths.RUNTIME_ASSET, runtimeDir);
+                }
+            } catch (Exception e) {
                 throw new IllegalStateException(
                         "cannot unpack assets/runtime into " + runtimeDir
                                 + ": " + e.getMessage(), e);
@@ -110,6 +119,14 @@ public final class CoreInstaller {
         } catch (Exception e) {
             Log.w(TAG, "cannot hash asset manifest: " + e.getMessage());
             return "";
+        }
+    }
+
+    private static boolean hasAsset(Context ctx, String assetPath) {
+        try (java.io.InputStream in = ctx.getAssets().open(assetPath)) {
+            return true;
+        } catch (IOException e) {
+            return false;
         }
     }
 

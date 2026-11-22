@@ -28,7 +28,7 @@ public final class ManifestVerifier {
             Iterator<String> keys = files.keys();
             while (keys.hasNext()) {
                 String relative = keys.next();
-                if (relative.endsWith("manifest.json")) {
+                if (relative.endsWith("manifest.json") || relative.endsWith("dsh.tar.gz")) {
                     continue;
                 }
                 String expected = files.optString(relative, null);

@@ -108,26 +108,14 @@ def prepare(dest_runtime_dir: str) -> bool:
     print("=" * 60)
 
     dest_runtime_dir = os.path.abspath(dest_runtime_dir)
-    dsh_dest = os.path.join(dest_runtime_dir, "dsh")
-    os.makedirs(dsh_dest, exist_ok=True)
+    os.makedirs(dest_runtime_dir, exist_ok=True)
+    dsh_tar = os.path.join(dest_runtime_dir, "dsh.tar.gz")
 
     dsh_source = find_dsh_source()
-    if dsh_source:
-        print(f"[*] Copying runtime from dsh-source {dsh_source} -> {dsh_dest} (preserving symlinks)...")
-        if os.path.exists(dsh_dest):
-            shutil.rmtree(dsh_dest)
-        os.makedirs(dsh_dest, exist_ok=True)
-        copied = False
-        if shutil.which("cp"):
-            res = subprocess.run(["cp", "-a", f"{dsh_source}/.", dsh_dest])
-            if res.returncode == 0:
-                copied = True
-        if not copied:
-            shutil.copytree(dsh_source, dsh_dest, symlinks=True, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
-        git_dir = os.path.join(dsh_dest, ".git")
-        if os.path.isdir(git_dir):
-            shutil.rmtree(git_dir, ignore_errors=True)
-        print("[OK] Copied dsh-source runtime files.")
+    if dsh_source and os.path.isdir(dsh_source):
+        print(f"[*] Packaging dsh-source {dsh_source} -> {dsh_tar}...")
+        subprocess.check_call(["tar", "-czf", dsh_tar, "-C", dsh_source, "."])
+        print(f"[OK] Packaged dsh.tar.gz ({os.path.getsize(dsh_tar) / (1024*1024):.2f} MB)")
     else:
         archive = find_prebuilt_archive()
         if not archive or not os.path.isfile(archive):
@@ -136,41 +124,24 @@ def prepare(dest_runtime_dir: str) -> bool:
                 archive = tmp_archive
 
         if archive and os.path.isfile(archive):
-            if not extract_archive(archive, dsh_dest):
-                return False
+            print(f"[*] Copying prebuilt archive {archive} -> {dsh_tar}...")
+            shutil.copy2(archive, dsh_tar)
+            print(f"[OK] Staged dsh.tar.gz ({os.path.getsize(dsh_tar) / (1024*1024):.2f} MB)")
         else:
             local_dsh = os.path.expanduser("~/deepseek-harness")
             if os.path.isdir(local_dsh):
-                print(f"[*] Copying runtime from local checkout {local_dsh} -> {dsh_dest}...")
-                for rel in ["apps", "packages", "package.json", "pnpm-workspace.yaml", "node_modules"]:
-                    src = os.path.join(local_dsh, rel)
-                    dst = os.path.join(dsh_dest, rel)
-                    if os.path.isdir(src):
-                        shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
-                    elif os.path.isfile(src):
-                        shutil.copy2(src, dst)
-                print("[OK] Copied local runtime files.")
+                print(f"[*] Packaging local checkout {local_dsh} -> {dsh_tar}...")
+                subprocess.check_call(["tar", "-czf", dsh_tar, "-C", local_dsh, "."])
+                print("[OK] Packaged local runtime files.")
             else:
                 print("[ERROR] No dsh-source, prebuilt archive, or local deepseek-harness found!")
                 return False
 
-    # Generate runtime manifest.json
-    manifest = {}
-    for root, _, files in os.walk(dest_runtime_dir):
-        for f in files:
-            full_path = os.path.join(root, f)
-            rel_path = os.path.relpath(full_path, dest_runtime_dir)
-            if rel_path == "manifest.json":
-                continue
-            h = sha256_file(full_path)
-            if h is not None:
-                manifest[rel_path] = h
-
     manifest_path = os.path.join(dest_runtime_dir, "manifest.json")
     with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump({"files": manifest}, f, indent=2)
+        json.dump({"files": {"dsh.tar.gz": sha256_file(dsh_tar)}}, f, indent=2)
 
-    print(f"[OK] Generated runtime manifest ({len(manifest)} files) -> {manifest_path}")
+    print(f"[OK] Generated runtime manifest -> {manifest_path}")
     return True
 
 

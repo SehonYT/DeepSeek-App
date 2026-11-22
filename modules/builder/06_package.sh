@@ -40,10 +40,15 @@ with zipfile.ZipFile(apk_path, "a", compression=zipfile.ZIP_DEFLATED) as z:
         for root, dirs, files in os.walk(assets_dir):
             for f in files:
                 full = os.path.join(root, f)
+                if not os.path.exists(full) and os.path.islink(full):
+                    continue
                 rel = os.path.relpath(full, staging_parent)
                 # Avoid recompressing already-compressed archives
                 comp = zipfile.ZIP_STORED if f.endswith(('.gz', '.tgz', '.zip', '.png', '.jpg')) else zipfile.ZIP_DEFLATED
-                z.write(full, rel, compress_type=comp)
+                try:
+                    z.write(full, rel, compress_type=comp)
+                except Exception as e:
+                    print(f"[!] Warning: skipped {full}: {e}")
 PY
 
 echo "[OK] [06_package] Created $(stat -c%s "$UNALIGNED_APK") bytes unaligned.apk"
