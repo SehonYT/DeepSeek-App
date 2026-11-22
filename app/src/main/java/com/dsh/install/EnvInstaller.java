@@ -42,7 +42,8 @@ public final class EnvInstaller {
         File prefix = prefix(context);
         boolean basic = new File(prefix, EnvPaths.MARKER).isFile()
                 && new File(prefix, EnvPaths.BASH_REL).isFile()
-                && new File(prefix, "bin/node").isFile();
+                && new File(prefix, "bin/node").isFile()
+                && new File(prefix, "lib/libsqlite3.so").exists();
         if (!basic) {
             return false;
         }
@@ -166,8 +167,9 @@ public final class EnvInstaller {
     private static void updateManagedLayers(Context context, AssetManager assets, File prefix,
                                             String bootstrapAsset, EnvBundleManifest manifest) {
         File nodeBin = new File(prefix, "bin/node");
-        if (!nodeBin.isFile()) {
-            Log.w(TAG, "existing prefix lacks node binary; forcing fresh install for DeepSeek...");
+        File sqliteLib = new File(prefix, "lib/libsqlite3.so");
+        if (!nodeBin.isFile() || !sqliteLib.exists()) {
+            Log.w(TAG, "existing prefix lacks node or libsqlite3; forcing fresh install for DeepSeek...");
             installFresh(context, assets, prefix, bootstrapAsset, manifest);
             return;
         }
@@ -248,6 +250,7 @@ public final class EnvInstaller {
         requireFile(new File(bin, "sh"), "sh");
         requireFile(new File(bin, "pkg"), "pkg wrapper");
         requireFile(new File(bin, "node"), "node");
+        requireFile(new File(prefix, "lib/libsqlite3.so"), "libsqlite3.so");
         requireFile(new File(prefix, "lib/libtermux-exec.so"), "libtermux-exec.so");
         if (minimumSymlinks > 0) {
             int actual = countSymlinks(prefix);
