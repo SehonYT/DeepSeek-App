@@ -101,6 +101,15 @@ def assemble_bundle(source_repo: str, out_archive: str):
         if not os.path.exists(link_path) and not os.path.islink(link_path):
             os.symlink(link_target, link_path)
 
+    # Symlink packages/node_modules and apps/node_modules to root node_modules for ESM resolution fallback
+    for parent_dir in ["packages", "apps"]:
+        parent_nm = os.path.join(work_dir, parent_dir, "node_modules")
+        if not os.path.exists(parent_nm) and not os.path.islink(parent_nm):
+            try:
+                os.symlink("../node_modules", parent_nm)
+            except Exception:
+                pass
+
     # apps/cli/node_modules/@deepseek-ai (NEVER link apps/cli to itself to avoid circular symlink loop!)
     cli_dir = os.path.join(work_dir, "apps", "cli")
     cli_nm_dsh = os.path.join(cli_dir, "node_modules", "@deepseek-ai")
@@ -125,8 +134,24 @@ def assemble_bundle(source_repo: str, out_archive: str):
         "js-yaml@^4.3.2",
         "node-addon-require-builtin@^0.1.9",
         "ws@^8.21.3",
+        "open@^11.0.2",
         "@agentclientprotocol/sdk@^1.4.0",
         "@modelcontextprotocol/sdk@^1.31.0",
+        "@modelcontextprotocol/client@2.2.0",
+        "@modelcontextprotocol/server@2.2.0",
+        "@anthropic-ai/sdk@^0.39.0",
+        "@noble/hashes@^2.4.0",
+        "buffer@^6.0.3",
+        "readable-stream@^4.7.0",
+        "string_decoder@^1.3.0",
+        "acorn@^8.18.0",
+        "acorn-walk@^8.3.5",
+        "got@^14.6.6",
+        "birpc@^4.2.0",
+        "@yarnpkg/parsers@^3.1.0",
+        "@babel/code-frame@^7.29.0",
+        "@jridgewell/gen-mapping@^0.3.13",
+        "@opentelemetry/api@^1.9.1",
         "execa@^10.0.1",
         "undici@^7.2.1",
         "hosted-git-info@^8.0.2",
@@ -168,8 +193,6 @@ def assemble_bundle(source_repo: str, out_archive: str):
                     src_item = os.path.join(iso_nm, item)
                     dst_item = os.path.join(target_nm, item)
                     if os.path.isdir(src_item):
-                        if os.path.exists(dst_item):
-                            shutil.rmtree(dst_item, ignore_errors=True)
                         copy_tree_files(src_item, dst_item)
                     else:
                         shutil.copy2(src_item, dst_item)
