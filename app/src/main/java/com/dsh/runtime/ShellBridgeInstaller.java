@@ -243,6 +243,7 @@ public final class ShellBridgeInstaller {
         sb.append("export LD_LIBRARY_PATH=\"$PREFIX/lib\"\n");
         sb.append("export PATH=\"$PREFIX/bin:/system/bin\"\n");
         sb.append("export TERM=\"xterm-256color\"\n");
+        sb.append("export PS1='$ '\n");
         sb.append("export TERMINFO=\"$PREFIX/share/terminfo\"\n");
         sb.append("export OPENSSL_CONF=\"$PREFIX/etc/tls/openssl.cnf\"\n");
         sb.append("export SSL_CERT_FILE=\"$PREFIX/etc/tls/cert.pem\"\n");

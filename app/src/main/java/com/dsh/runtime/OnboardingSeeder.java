@@ -64,14 +64,19 @@ public final class OnboardingSeeder {
             }
 
             File bashrc = new File(homeDir, ".bashrc");
-            if (!bashrc.isFile() || bashrc.length() == 0) {
-                String bashrcContent = "# DeepSeek Interactive Bash Config\n"
-                        + "if [ -n \"$PREFIX\" ] && [ -f \"$PREFIX/etc/bash.bashrc\" ]; then\n"
-                        + "    . \"$PREFIX/etc/bash.bashrc\"\n"
-                        + "elif [ -f \"$HOME/usr/etc/bash.bashrc\" ]; then\n"
-                        + "    . \"$HOME/usr/etc/bash.bashrc\"\n"
-                        + "fi\n";
-                AtomicFileWriter.writeText(bashrc, bashrcContent);
+            String bashrcContent = "# DeepSeek Interactive Bash Config\n"
+                    + "export PS1='$ '\n"
+                    + "if [ -n \"$PREFIX\" ] && [ -f \"$PREFIX/etc/bash.bashrc\" ]; then\n"
+                    + "    . \"$PREFIX/etc/bash.bashrc\"\n"
+                    + "elif [ -f \"$HOME/usr/etc/bash.bashrc\" ]; then\n"
+                    + "    . \"$HOME/usr/etc/bash.bashrc\"\n"
+                    + "fi\n"
+                    + "export PS1='$ '\n";
+            AtomicFileWriter.writeText(bashrc, bashrcContent);
+
+            File wsDir = new File(homeDir, "workspace");
+            if (!wsDir.exists()) {
+                wsDir.mkdirs();
             }
         } catch (Exception e) {
             Log.w(TAG, "onboarding seed failed (continuing): " + e.getMessage());

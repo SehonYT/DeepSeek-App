@@ -69,6 +69,7 @@ public final class CoreEnvironment {
         // PTY children need a terminal type, and the bootstrap prefix ships the
         // terminfo database that resolves it.
         env.put("TERM", "xterm-256color");
+        env.put("PS1", "$ ");
         File terminfo = new File(prefix, "share/terminfo");
         if (terminfo.isDirectory()) {
             env.put("TERMINFO", terminfo.getAbsolutePath());
