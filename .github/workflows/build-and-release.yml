@@ -22,9 +22,6 @@ on:
         description: 'Mark as Pre-release'
         type: boolean
         default: false
-      vendor_url:
-        description: 'Optional direct URL to download vendor inputs archive'
-        required: false
 
 permissions:
   contents: write
@@ -71,11 +68,10 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-          # 2. Setup Android API 28 android.jar if absent
+          # 2. Setup Android API 34 android.jar if absent
           if [ ! -f "tools/android.jar" ]; then
-            echo "[CI] Fetching android.jar (API 28)..."
-            curl -fsSL -o tools/android.jar "https://github.com/Sable/android-platforms/raw/master/android-28/android.jar" || \
-            curl -fsSL -o tools/android.jar "https://raw.githubusercontent.com/iBotPeaches/platform_frameworks_base/master/android-28.jar"
+            echo "[CI] Fetching android.jar (API 34)..."
+            curl -fsSL -o tools/android.jar "https://raw.githubusercontent.com/Sable/android-platforms/master/android-34/android.jar"
           fi
 
           # 3. Setup R8 / D8 compiler jar if absent
@@ -85,18 +81,10 @@ jobs:
           fi
 
       - name: Fetch DeepSeek Harness Runtime Bundle
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "[CI] Fetching latest prebuilt DeepSeek Harness Termux release..."
-          LATEST_TARBALL=$(curl -fsSL "https://api.github.com/repos/salmanbappi/deepseek-harness/releases/latest" | grep "browser_download_url.*dsh-termux-prebuilt.*\.tar\.gz" | cut -d '"' -f 4 | head -n 1 || true)
-          if [ -n "$LATEST_TARBALL" ]; then
-            echo "[CI] Downloading $LATEST_TARBALL..."
-            curl -fsSL -o archives/dsh-termux-prebuilt.tar.gz "$LATEST_TARBALL"
-          else
-            echo "[CI] Trying direct download..."
-            curl -fsSL -o archives/dsh-termux-prebuilt.tar.gz "https://github.com/salmanbappi/deepseek-harness/releases/download/v0.2.2-rc.3/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz" || true
-          fi
+          mkdir -p archives
+          echo "[CI] Fetching prebuilt DeepSeek Harness Termux release..."
+          curl -fsSL -o archives/dsh-termux-prebuilt.tar.gz "https://github.com/salmanbappi/deepseek-harness/releases/download/v0.2.2-rc.3/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz" || true
           ls -lh archives/
 
       - name: Build DeepSeek Release APK (dist/deepseek.apk)
@@ -136,25 +124,5 @@ jobs:
             dist/deepseek-dev.apk
             dist/SHA256SUMS.txt
           body: |
-            <div align="center">
-              <h3>DeepSeek Mobile for Android</h3>
-              <p>Autonomous AI Coding Environment &bull; Native Termux Bionic Userspace &bull; ARM64</p>
-            </div>
-
-            ---
-
-            ### Packages & Artifacts
-
-            | Package | Description |
-            | :--- | :--- |
-            | **`deepseek.apk`** | Standard production release with native bionic engine (com.dsh, port 45257) |
-            | **`deepseek-dev.apk`** | Developer edition with debug flags (com.dsh.dev, port 45258) |
-            | **`SHA256SUMS.txt`** | Cryptographic checksums for package integrity verification |
-
-            ---
-
-            ### Features
-
-            * **Native Termux Bionic Userspace:** Runs directly in native Android userspace without virtualization or PRoot overhead.
-            * **DeepSeek AI Agent Engine:** Powered by DeepSeek Harness with full terminal, tools, subagents, and memory capabilities.
-            * **Full Web & Mobile UI:** Material 3 UI loaded smoothly via internal WebView with background micro-service supervisor.
+            ### DeepSeek Mobile for Android
+            Autonomous AI Coding Environment &bull; Native Termux Bionic Userspace &bull; ARM64
