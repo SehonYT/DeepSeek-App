@@ -52,15 +52,19 @@ public final class CoreInstaller {
         } else {
             Log.i(TAG, "runtime up to date (manifest hash matched); skipping extract");
         }
-        if (!isWebExtracted(rm)) {
-            try {
-                AssetUnpacker.unpackTree(ctx.getAssets(), RuntimePaths.WEB_ASSET, rm.getWebDir());
-                writeMarker(rm.getWebDir(), RuntimePaths.WEB_MARKER);
-            } catch (IOException e) {
-                throw new IllegalStateException(
-                        "cannot unpack assets/web into " + rm.getWebDir()
-                                + ": " + e.getMessage(), e);
+        if (hasAssetTree(ctx, RuntimePaths.WEB_ASSET)) {
+            if (!isWebExtracted(rm)) {
+                try {
+                    AssetUnpacker.unpackTree(ctx.getAssets(), RuntimePaths.WEB_ASSET, rm.getWebDir());
+                    writeMarker(rm.getWebDir(), RuntimePaths.WEB_MARKER);
+                } catch (IOException e) {
+                    Log.w(TAG, "cannot unpack assets/web into " + rm.getWebDir()
+                            + ": " + e.getMessage());
+                }
             }
+        } else {
+            rm.getWebDir().mkdirs();
+            writeMarker(rm.getWebDir(), RuntimePaths.WEB_MARKER);
         }
         // Exec bits are set once at extraction (and on every generated bridge), so
         // no recursive chmod is needed on a warm launch.
@@ -106,6 +110,15 @@ public final class CoreInstaller {
         } catch (Exception e) {
             Log.w(TAG, "cannot hash asset manifest: " + e.getMessage());
             return "";
+        }
+    }
+
+    private static boolean hasAssetTree(Context ctx, String assetDir) {
+        try {
+            String[] list = ctx.getAssets().list(assetDir);
+            return list != null && list.length > 0;
+        } catch (IOException e) {
+            return false;
         }
     }
 

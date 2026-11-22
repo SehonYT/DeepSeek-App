@@ -84,12 +84,12 @@
              original login flow runs unmodified. -->
 
         <activity
-            android:name="com.dsh.ui.launcher.LauncherDarkActivity"
+            android:name="com.dsh.ui.launcher.LauncherLightActivity"
             android:enabled="true"
             android:exported="true"
-            android:theme="@style/SplashThemeDark"
-            android:icon="@mipmap/ic_launcher_dark"
-            android:roundIcon="@mipmap/ic_launcher_dark_round"
+            android:theme="@style/SplashThemeLight"
+            android:icon="@mipmap/ic_launcher_light"
+            android:roundIcon="@mipmap/ic_launcher_light_round"
             android:label="@string/app_name"
             android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode|density"
@@ -101,12 +101,12 @@
         </activity>
 
         <activity
-            android:name="com.dsh.ui.launcher.LauncherLightActivity"
+            android:name="com.dsh.ui.launcher.LauncherDarkActivity"
             android:enabled="false"
             android:exported="true"
-            android:theme="@style/SplashThemeLight"
-            android:icon="@mipmap/ic_launcher_light"
-            android:roundIcon="@mipmap/ic_launcher_light_round"
+            android:theme="@style/SplashThemeDark"
+            android:icon="@mipmap/ic_launcher_dark"
+            android:roundIcon="@mipmap/ic_launcher_dark_round"
             android:label="@string/app_name"
             android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode|density"

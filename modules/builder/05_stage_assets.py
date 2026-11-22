@@ -38,6 +38,14 @@ def stage_assets(staging_dir):
     shutil.copytree(env_src, env_dst)
     print(f"[OK] Staged env assets.")
 
+    web_src = os.path.join(PROJECT_ROOT, "web")
+    web_dst = os.path.join(assets_dir, "web")
+    if os.path.isdir(web_src):
+        if os.path.exists(web_dst):
+            shutil.rmtree(web_dst)
+        shutil.copytree(web_src, web_dst)
+        print(f"[OK] Staged web assets from {web_src} -> {web_dst}")
+
     print(f"[OK] Staged all assets into {assets_dir}")
     return assets_dir
 
