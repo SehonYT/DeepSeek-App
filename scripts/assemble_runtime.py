@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import json
 import glob
+import tempfile
 import tarfile
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -25,6 +26,23 @@ def run(cmd, cwd=None, check=True):
     print(f"[*] Running: {' '.join(cmd) if isinstance(cmd, list) else cmd}")
     res = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), check=check)
     return res.returncode == 0
+
+
+def copy_tree_files(src_dir, dst_dir):
+    for root, dirs, files in os.walk(src_dir):
+        rel = os.path.relpath(root, src_dir)
+        target_dir = os.path.join(dst_dir, rel) if rel != "." else dst_dir
+        os.makedirs(target_dir, exist_ok=True)
+        for f in files:
+            src_f = os.path.join(root, f)
+            dst_f = os.path.join(target_dir, f)
+            if os.path.islink(src_f):
+                link_target = os.readlink(src_f)
+                if os.path.lexists(dst_f):
+                    os.remove(dst_f)
+                os.symlink(link_target, dst_f)
+            else:
+                shutil.copy2(src_f, dst_f)
 
 
 def assemble_bundle(source_repo: str, out_archive: str):
@@ -78,7 +96,8 @@ def assemble_bundle(source_repo: str, out_archive: str):
             os.symlink(link_target, link_path)
 
     # apps/cli/node_modules/@deepseek-ai
-    cli_nm_dsh = os.path.join(work_dir, "apps", "cli", "node_modules", "@deepseek-ai")
+    cli_dir = os.path.join(work_dir, "apps", "cli")
+    cli_nm_dsh = os.path.join(cli_dir, "node_modules", "@deepseek-ai")
     os.makedirs(cli_nm_dsh, exist_ok=True)
     for name, rel in symlinks.items():
         short_name = name.split("/", 1)[1]
@@ -87,8 +106,7 @@ def assemble_bundle(source_repo: str, out_archive: str):
         if not os.path.exists(link_path) and not os.path.islink(link_path):
             os.symlink(link_target, link_path)
 
-    print("[*] 4. Installing minimal production dependencies without .pnpm virtual-store bloat...")
-    # Production dependencies for CLI execution
+    print("[*] 4. Installing production dependencies in isolated temp directory (4MB)...")
     prod_pkgs = [
         "ajv@^8.20.0",
         "commander@^15.0.0",
@@ -100,11 +118,27 @@ def assemble_bundle(source_repo: str, out_archive: str):
         "ws@^8.21.3",
         "@eslint-community/regexpp@^4.12.2"
     ]
-    cli_dir = os.path.join(work_dir, "apps", "cli")
-    run(["npm", "install", "--no-package-lock", "--omit=dev", "--legacy-peer-deps"] + prod_pkgs, cwd=cli_dir)
-
-    # Also install in root node_modules for hoisted resolution
-    run(["npm", "install", "--no-package-lock", "--omit=dev", "--legacy-peer-deps"] + prod_pkgs, cwd=work_dir)
+    iso_dir = tempfile.mkdtemp(prefix="dsh_npm_iso_")
+    try:
+        run(["npm", "install", "--no-package-lock", "--omit=dev", "--legacy-peer-deps"] + prod_pkgs, cwd=iso_dir)
+        iso_nm = os.path.join(iso_dir, "node_modules")
+        if os.path.isdir(iso_nm):
+            # Copy into root node_modules and apps/cli/node_modules
+            for target_nm in [os.path.join(work_dir, "node_modules"), os.path.join(cli_dir, "node_modules")]:
+                os.makedirs(target_nm, exist_ok=True)
+                for item in os.listdir(iso_nm):
+                    if item.startswith("."):
+                        continue
+                    src_item = os.path.join(iso_nm, item)
+                    dst_item = os.path.join(target_nm, item)
+                    if os.path.isdir(src_item):
+                        if os.path.exists(dst_item):
+                            shutil.rmtree(dst_item, ignore_errors=True)
+                        copy_tree_files(src_item, dst_item)
+                    else:
+                        shutil.copy2(src_item, dst_item)
+    finally:
+        shutil.rmtree(iso_dir, ignore_errors=True)
 
     print("[*] 5. Installing mobile sharp-wasm32 and @emnapi/runtime...")
     for target_nm in [os.path.join(work_dir, "node_modules"), os.path.join(cli_dir, "node_modules")]:
