@@ -18,6 +18,23 @@ public final class CoreInstaller {
     private CoreInstaller() {
     }
 
+    private static void extractArchive(Context ctx, String assetName, File destDir) throws IOException {
+        File tmp = File.createTempFile("dsh_archive", ".tar.gz", ctx.getCacheDir());
+        try {
+            AssetUnpacker.copyFile(ctx.getAssets(), assetName, tmp);
+            if (com.dsh.install.TarRunner.runToyboxTar(tmp, destDir, true)) {
+                Log.i(TAG, "Extracted " + assetName + " with system/toybox tar");
+                return;
+            }
+            Log.w(TAG, "System tar failed; using TarExtractor Java fallback for " + assetName);
+            try (java.io.InputStream in = new java.io.FileInputStream(tmp)) {
+                com.dsh.install.TarExtractor.untarGz(in, destDir);
+            }
+        } finally {
+            com.dsh.util.IoUtil.deleteQuietly(tmp);
+        }
+    }
+
     public static void installCore(RuntimeManager rm) {
         Context ctx = rm.appContext();
         File runtimeDir = rm.getRuntimeDir();
@@ -41,7 +58,7 @@ public final class CoreInstaller {
                     if (!dshDir.exists()) {
                         dshDir.mkdirs();
                     }
-                    com.dsh.install.BootstrapExtractor.extract(ctx.getAssets(), "runtime/dsh.tar.gz", dshDir);
+                    extractArchive(ctx, "runtime/dsh.tar.gz", dshDir);
                 } else {
                     AssetUnpacker.unpackTree(ctx.getAssets(), RuntimePaths.RUNTIME_ASSET, runtimeDir);
                 }
