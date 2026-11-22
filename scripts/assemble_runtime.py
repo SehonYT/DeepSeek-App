@@ -135,6 +135,8 @@ def assemble_bundle(source_repo: str, out_archive: str):
         "node-addon-require-builtin@^0.1.9",
         "ws@^8.21.3",
         "open@^11.0.2",
+        "@xterm/headless@^6.0.0",
+        "@xterm/addon-serialize@^0.14.0",
         "@agentclientprotocol/sdk@^1.4.0",
         "@modelcontextprotocol/sdk@^1.31.0",
         "@modelcontextprotocol/client@2.2.0",
