@@ -125,7 +125,7 @@ def assemble_bundle(source_repo: str, out_archive: str):
 
     print("[*] 4. Installing production dependencies in isolated temp directory...")
     prod_pkgs = [
-        "zod@^3.24.2",
+        "zod@4.6.6",
         "yaml@^2.7.0",
         "semver@^7.8.5",
         "commander@^15.0.0",
@@ -156,7 +156,7 @@ def assemble_bundle(source_repo: str, out_archive: str):
         "undici@^7.2.1",
         "hosted-git-info@^8.0.2",
         "resolve.exports@^2.0.3",
-        "diff@^7.0.0",
+        "diff@^9.0.0",
         "@js-temporal/polyfill@^0.4.4",
         "fflate@^0.8.2",
         "@standard-schema/spec@^1.0.0",
