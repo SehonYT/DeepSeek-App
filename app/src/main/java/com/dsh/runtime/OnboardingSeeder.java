@@ -65,13 +65,13 @@ public final class OnboardingSeeder {
 
             File bashrc = new File(homeDir, ".bashrc");
             String bashrcContent = "# DeepSeek Interactive Bash Config\n"
-                    + "export PS1='$ '\n"
+                    + "export PS1='\\[\\e[0;32m\\]\\w\\[\\e[0m\\] \\$ '\n"
                     + "if [ -n \"$PREFIX\" ] && [ -f \"$PREFIX/etc/bash.bashrc\" ]; then\n"
                     + "    . \"$PREFIX/etc/bash.bashrc\"\n"
                     + "elif [ -f \"$HOME/usr/etc/bash.bashrc\" ]; then\n"
                     + "    . \"$HOME/usr/etc/bash.bashrc\"\n"
                     + "fi\n"
-                    + "export PS1='$ '\n";
+                    + "export PS1='\\[\\e[0;32m\\]\\w\\[\\e[0m\\] \\$ '\n";
             AtomicFileWriter.writeText(bashrc, bashrcContent);
 
             File wsDir = new File(homeDir, "workspace");
