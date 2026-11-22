@@ -63,11 +63,14 @@ def assemble_bundle(source_repo: str, out_archive: str):
     print("[*] 2. Copying package manifests, cordis configs, and workspace metadata...")
     symlinks = {}
     RUNTIME_EXTS = (
-        ".json", ".yml", ".yaml", ".sql", ".txt", ".html", ".css", ".svg", ".png", ".ico"
+        ".json", ".yml", ".yaml", ".sql", ".txt", ".html", ".css", ".svg", ".png", ".ico", ".md"
     )
     for root, dirs, files in os.walk(source_repo):
-        # Skip node_modules, git, tests, benchmarks, docs, and TypeScript source dirs
-        dirs[:] = [d for d in dirs if d not in ("node_modules", ".git", "tests", "benchmarks", "docs", "src")]
+        # Skip node_modules, git, tests, benchmarks, and TypeScript source dirs (and root docs)
+        skip_dirs = ["node_modules", ".git", "tests", "benchmarks", "src"]
+        if root == source_repo:
+            skip_dirs.append("docs")
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
         rel = os.path.relpath(root, source_repo)
         dest_dir = os.path.join(work_dir, rel) if rel != "." else work_dir
 
@@ -135,6 +138,7 @@ def assemble_bundle(source_repo: str, out_archive: str):
         "node-addon-require-builtin@^0.1.9",
         "ws@^8.21.3",
         "open@^11.0.2",
+        "@earendil-works/pi-ai@^1.3.0",
         "@xterm/headless@^6.0.0",
         "@xterm/addon-serialize@^0.14.0",
         "@agentclientprotocol/sdk@^1.4.0",
@@ -327,10 +331,11 @@ module.exports.default = module.exports;
     print("[*] 8. Pruning development and test files...")
     for root, dirs, files in os.walk(work_dir, topdown=False):
         for d in dirs:
-            if d in ("tests", "benchmarks", "docs", ".git", ".github", "__tests__"):
+            if d in ("tests", "benchmarks", ".git", ".github", "__tests__"):
                 shutil.rmtree(os.path.join(root, d), ignore_errors=True)
         for f in files:
-            if f.endswith((".ts", ".map", ".md", ".test.js", ".spec.js")) and not f.endswith(".d.ts"):
+            # Preserve .md (README, plugin details, docs) and .d.ts
+            if f.endswith((".ts", ".map", ".test.js", ".spec.js")) and not f.endswith(".d.ts"):
                 try:
                     os.remove(os.path.join(root, f))
                 except Exception:
