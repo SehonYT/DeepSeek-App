@@ -110,17 +110,45 @@ def assemble_bundle(source_repo: str, out_archive: str):
         if not os.path.exists(link_path) and not os.path.islink(link_path):
             os.symlink(link_target, link_path)
 
-    print("[*] 4. Installing production dependencies in isolated temp directory (4MB)...")
+    print("[*] 4. Installing production dependencies in isolated temp directory...")
     prod_pkgs = [
-        "ajv@^8.20.0",
+        "zod@^3.24.2",
+        "yaml@^2.7.0",
+        "semver@^7.8.5",
         "commander@^15.0.0",
-        "execa@^10.0.1",
+        "chokidar@^4.0.3",
+        "picomatch@^4.0.2",
         "js-yaml@^4.3.2",
         "node-addon-require-builtin@^0.1.9",
-        "resolve.exports@^2.0.3",
-        "semver@^7.8.5",
         "ws@^8.21.3",
-        "@eslint-community/regexpp@^4.12.2"
+        "@agentclientprotocol/sdk@^1.4.0",
+        "@modelcontextprotocol/sdk@^1.31.0",
+        "execa@^10.0.1",
+        "undici@^7.2.1",
+        "hosted-git-info@^8.0.2",
+        "resolve.exports@^2.0.3",
+        "diff@^7.0.0",
+        "@js-temporal/polyfill@^0.4.4",
+        "fflate@^0.8.2",
+        "@standard-schema/spec@^1.0.0",
+        "mime-types@^2.1.35",
+        "mime@^4.0.6",
+        "ipaddr.js@^2.2.0",
+        "negotiator@^1.0.0",
+        "eventsource-parser@^3.0.0",
+        "p-limit@^6.2.0",
+        "minisearch@^7.1.1",
+        "compression@^1.8.0",
+        "serve-static@^1.16.2",
+        "turndown@^7.2.0",
+        "@joplin/turndown-plugin-gfm@^1.0.45",
+        "fuzzysort@^3.1.0",
+        "rrule@^2.8.1",
+        "shell-quote@^1.8.2",
+        "cross-spawn@^7.0.6",
+        "which@^5.0.0",
+        "@eslint-community/regexpp@^4.12.2",
+        "ajv@^8.20.0"
     ]
     iso_dir = tempfile.mkdtemp(prefix="dsh_npm_iso_")
     try:
@@ -143,6 +171,60 @@ def assemble_bundle(source_repo: str, out_archive: str):
                         shutil.copy2(src_item, dst_item)
     finally:
         shutil.rmtree(iso_dir, ignore_errors=True)
+
+    print("[*] 4b. Injecting Koffi fallback stub for Android...")
+    koffi_stub_code = """function createKoffiStub() {
+  const dummyFn = () => {};
+  return {
+    LibraryHandle: class {},
+    TypeObject: class {},
+    Union: class {},
+    address: dummyFn,
+    alias: (name, type) => type,
+    alignof: () => 8,
+    alloc: () => 0n,
+    array: (t, len) => ({ size: (len || 1) * 2, type: t, length: len }),
+    as: (v2) => v2,
+    call: dummyFn,
+    config: dummyFn,
+    decode: () => null,
+    disposable: (v2) => v2,
+    encode: dummyFn,
+    enumeration: dummyFn,
+    errno: () => 0,
+    extension: dummyFn,
+    free: dummyFn,
+    in: (v2) => v2,
+    inout: (v2) => v2,
+    introspect: (spec) => ({ size: (spec && spec.size) || 0, alignment: 8, members: {} }),
+    load: (libName) => {
+      throw new Error(`Cannot load native library "${libName}": Koffi is not supported on Android`);
+    },
+    opaque: () => ({ size: 0, alignment: 8 }),
+    os: { errno: () => 0 },
+    out: (v2) => v2,
+    pointer: (type) => ({ size: 8, alignment: 8, type }),
+    proto: () => ({ size: 8, alignment: 8 }),
+    register: dummyFn,
+    reset: dummyFn,
+    resolve: (type) => type,
+    sizeof: () => 8,
+    stats: () => ({}),
+    struct: () => ({ size: 8, alignment: 8 }),
+    types: {}
+  };
+}
+module.exports = createKoffiStub();
+module.exports.default = module.exports;
+"""
+    koffi_pj = json.dumps({"name": "koffi", "version": "2.9.12", "main": "index.js", "type": "commonjs"}, indent=2)
+    for target_nm in [os.path.join(work_dir, "node_modules"), os.path.join(cli_dir, "node_modules")]:
+        k_dir = os.path.join(target_nm, "koffi")
+        os.makedirs(k_dir, exist_ok=True)
+        with open(os.path.join(k_dir, "index.js"), "w", encoding="utf-8") as f:
+            f.write(koffi_stub_code)
+        with open(os.path.join(k_dir, "package.json"), "w", encoding="utf-8") as f:
+            f.write(koffi_pj)
 
     print("[*] 5. Installing mobile sharp-wasm32 and @emnapi/runtime...")
     for target_nm in [os.path.join(work_dir, "node_modules"), os.path.join(cli_dir, "node_modules")]:
