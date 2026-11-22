@@ -87,6 +87,19 @@ jobs:
           curl -fsSL -o archives/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz "https://github.com/salmanbappi/deepseek-harness/releases/download/v0.2.2-rc.3/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz"
           ls -lh archives/
 
+      - name: Sync App Version from Tag
+        run: |
+          TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
+          if [[ "$TAG" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            VER="${BASH_REMATCH[1]}"
+            echo "[CI] Updating config/app.env to version $VER (from $TAG)..."
+            sed -i -E "s/^APP_VERSION_NAME=.*/APP_VERSION_NAME=$VER/" config/app.env
+            IFS='.' read -r major minor patch <<< "$VER"
+            CODE=$(( major * 10000 + minor * 100 + patch ))
+            sed -i -E "s/^APP_VERSION_CODE=.*/APP_VERSION_CODE=$CODE/" config/app.env
+          fi
+          cat config/app.env
+
       - name: Build DeepSeek Release APK (dist/deepseek.apk)
         run: |
           bash build.sh

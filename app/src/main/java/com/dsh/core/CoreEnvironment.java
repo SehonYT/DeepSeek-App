@@ -74,10 +74,15 @@ public final class CoreEnvironment {
             godebugBuilder.append(",cpu.all=off,arm64.aes=off,arm64.pmull=off,arm64.sha1=off,arm64.sha2=off,arm64.sha3=off,arm64.sha512=off,arm64.crc32=off,arm64.atomics=off,arm64.cpuid=off");
         }
 
-        env.put("GODEBUG", godebugBuilder.toString());
-        // Emits "ANTIGRAVITY_OPEN_URL: <url>" directly to stdout from language_server
-        // so OpenUrlWatcher captures the auth URL and opens the external browser reliably.
-        env.put("ANTIGRAVITY_VSCODE_HOST", "1");
+        env.put("NODE_ENV", "production");
+        env.put("DEEPSEEK_HOST", "127.0.0.1");
+        env.put("DEEPSEEK_PORT", String.valueOf(rm.getHttpsPort()));
+        File dshDir = new File(rm.getRuntimeDir(), "dsh");
+        File nodeModules = new File(dshDir, "node_modules");
+        if (nodeModules.isDirectory()) {
+            env.put("NODE_PATH", nodeModules.getAbsolutePath());
+        }
+
         // Configure browser and desktop environment so core OAuth/open tools find the browser
         File xdgOpen = new File(bin, "xdg-open");
         env.put("BROWSER", xdgOpen.getAbsolutePath());
@@ -87,13 +92,12 @@ public final class CoreEnvironment {
         env.put("XDG_DATA_DIRS", rm.getRuntimeDir().getAbsolutePath());
         env.put("XDG_DATA_HOME", new File(files, ".local/share").getAbsolutePath());
         env.put("XDG_CONFIG_HOME", new File(files, ".config").getAbsolutePath());
-        // The glibc loader resolves libraries via --library-path; keep bionic's out of the way.
-        env.remove("LD_LIBRARY_PATH");
-        // Do NOT export LD_PRELOAD into the process environment!
-        // liblse_compat.so is a GLIBC library; exporting it in env causes Bionic's
-        // dynamic linker to crash when executing /system/bin/sh (xdg-open, bridges, termux).
-        // RuntimeManager.coreCommand() already preloads it into language_server via the
-        // glibc loader's CLI argument: --preload <path>/liblse_compat.so.
+
+        // Bionic loader needs LD_LIBRARY_PATH pointing to $PREFIX/lib
+        File prefixLib = new File(prefix, "lib");
+        if (prefixLib.isDirectory()) {
+            env.put("LD_LIBRARY_PATH", prefixLib.getAbsolutePath());
+        }
         env.remove("LD_PRELOAD");
     }
 

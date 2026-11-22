@@ -41,7 +41,8 @@ public final class EnvInstaller {
     public static boolean isInstalled(Context context) {
         File prefix = prefix(context);
         boolean basic = new File(prefix, EnvPaths.MARKER).isFile()
-                && new File(prefix, EnvPaths.BASH_REL).isFile();
+                && new File(prefix, EnvPaths.BASH_REL).isFile()
+                && new File(prefix, "bin/node").isFile();
         if (!basic) {
             return false;
         }
@@ -164,6 +165,12 @@ public final class EnvInstaller {
     /** Refreshes AGY-owned layers but never wipes the mutable prefix or .gemini data. */
     private static void updateManagedLayers(Context context, AssetManager assets, File prefix,
                                             String bootstrapAsset, EnvBundleManifest manifest) {
+        File nodeBin = new File(prefix, "bin/node");
+        if (!nodeBin.isFile()) {
+            Log.w(TAG, "existing prefix lacks node binary; forcing fresh install for DeepSeek...");
+            installFresh(context, assets, prefix, bootstrapAsset, manifest);
+            return;
+        }
         Properties previous = readState(new File(prefix, EnvPaths.MARKER));
         String oldBootstrap = previous.getProperty("bootstrap_sha256");
         String oldOverlay = previous.getProperty("overlay_sha256");
@@ -240,6 +247,7 @@ public final class EnvInstaller {
         requireFile(new File(bin, "bash"), "bash");
         requireFile(new File(bin, "sh"), "sh");
         requireFile(new File(bin, "pkg"), "pkg wrapper");
+        requireFile(new File(bin, "node"), "node");
         requireFile(new File(prefix, "lib/libtermux-exec.so"), "libtermux-exec.so");
         if (minimumSymlinks > 0) {
             int actual = countSymlinks(prefix);
