@@ -267,13 +267,47 @@ module.exports.default = module.exports;
         shutil.rmtree(os.path.join(emnapi_dir, "runtime"), ignore_errors=True)
         os.rename(os.path.join(emnapi_dir, "package"), os.path.join(emnapi_dir, "runtime"))
 
-    print("[*] 6. Installing android-arm64 pty.node...")
-    pty_source = os.path.join(PROJECT_ROOT, "vendor", "native", "android-arm64", "pty.node")
-    if os.path.isfile(pty_source):
-        for nm_path in [os.path.join(work_dir, "node_modules"), os.path.join(cli_dir, "node_modules")]:
-            pty_target_dir = os.path.join(nm_path, "node-pty", "prebuilds", "android-arm64")
-            os.makedirs(pty_target_dir, exist_ok=True)
-            shutil.copy2(pty_source, os.path.join(pty_target_dir, "pty.node"))
+    print("[*] 6. Installing complete node-pty package with android-arm64 binary...")
+    node_pty_tmp = tempfile.mkdtemp(prefix="dsh_node_pty_")
+    try:
+        run(f'curl -sL https://registry.npmjs.org/node-pty/-/node-pty-1.2.0-beta.15.tgz | tar -xz -C "{node_pty_tmp}"')
+        src_pty_pkg = os.path.join(node_pty_tmp, "package")
+        # Apply patch if present in source_repo
+        pty_patch = os.path.join(source_repo, "patches", "node-pty@1.2.0-beta.15.patch")
+        if os.path.isfile(pty_patch):
+            run(f'patch -p1 -i "{pty_patch}"', cwd=src_pty_pkg, check=False)
+        # Prune build/src/third_party/other-arch prebuilds
+        for prune_dir in ["src", "third_party"]:
+            shutil.rmtree(os.path.join(src_pty_pkg, prune_dir), ignore_errors=True)
+        pb_dir = os.path.join(src_pty_pkg, "prebuilds")
+        if os.path.isdir(pb_dir):
+            for arch in os.listdir(pb_dir):
+                if arch != "android-arm64":
+                    shutil.rmtree(os.path.join(pb_dir, arch), ignore_errors=True)
+        # Inject our android-arm64 pty.node
+        pty_source = os.path.join(PROJECT_ROOT, "vendor", "native", "android-arm64", "pty.node")
+        if os.path.isfile(pty_source):
+            android_pb = os.path.join(src_pty_pkg, "prebuilds", "android-arm64")
+            build_rel = os.path.join(src_pty_pkg, "build", "Release")
+            os.makedirs(android_pb, exist_ok=True)
+            os.makedirs(build_rel, exist_ok=True)
+            shutil.copy2(pty_source, os.path.join(android_pb, "pty.node"))
+            shutil.copy2(pty_source, os.path.join(build_rel, "pty.node"))
+
+        # Install node-pty into work_dir/node_modules, apps/cli/node_modules, and packages/subprocess/subprocess-local/node_modules
+        subprocess_local_dir = os.path.join(work_dir, "packages", "subprocess", "subprocess-local")
+        target_dirs = [
+            os.path.join(work_dir, "node_modules", "node-pty"),
+            os.path.join(cli_dir, "node_modules", "node-pty"),
+            os.path.join(subprocess_local_dir, "node_modules", "node-pty")
+        ]
+        for td in target_dirs:
+            os.makedirs(os.path.dirname(td), exist_ok=True)
+            if os.path.exists(td):
+                shutil.rmtree(td, ignore_errors=True)
+            copy_tree_files(src_pty_pkg, td)
+    finally:
+        shutil.rmtree(node_pty_tmp, ignore_errors=True)
 
     print("[*] 7. Applying mobile patches...")
     patch_script = os.path.join(source_repo, "scripts", "patch_termux.py")
