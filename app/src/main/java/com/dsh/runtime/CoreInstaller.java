@@ -186,6 +186,17 @@ public final class CoreInstaller {
     }
 
     private static void wipe(RuntimeManager rm, File dir) throws IOException {
+        if (dir == null) {
+            return;
+        }
+        if (com.dsh.install.TextFileDetector.isSymlink(dir)) {
+            try {
+                android.system.Os.remove(dir.getAbsolutePath());
+            } catch (Exception e) {
+                dir.delete();
+            }
+            return;
+        }
         assertSafeToWipe(rm, dir);
         if (!dir.exists()) {
             return;
@@ -193,11 +204,21 @@ public final class CoreInstaller {
         File[] children = dir.listFiles();
         if (children != null) {
             for (File child : children) {
-                wipe(rm, child);
+                if (com.dsh.install.TextFileDetector.isSymlink(child)) {
+                    try {
+                        android.system.Os.remove(child.getAbsolutePath());
+                    } catch (Exception e) {
+                        child.delete();
+                    }
+                } else if (child.isDirectory()) {
+                    wipe(rm, child);
+                } else {
+                    child.delete();
+                }
             }
         }
         if (!dir.delete()) {
-            throw new IOException("cannot delete " + dir);
+            dir.deleteOnExit();
         }
     }
 
@@ -207,11 +228,14 @@ public final class CoreInstaller {
      * and anything outside {@code getFilesDir()}.
      */
     private static void assertSafeToWipe(RuntimeManager rm, File dir) throws IOException {
+        if (com.dsh.install.TextFileDetector.isSymlink(dir)) {
+            return;
+        }
         File files = rm.appContext().getFilesDir();
-        String filesPath = files.getCanonicalPath();
-        String dshPath = new File(files, ".dsh").getCanonicalPath();
-        String geminiPath = new File(files, RuntimePaths.GEMINI_DIR).getCanonicalPath();
-        String target = dir.getCanonicalPath();
+        String filesPath = files.getAbsolutePath();
+        String dshPath = new File(files, ".dsh").getAbsolutePath();
+        String geminiPath = new File(files, RuntimePaths.GEMINI_DIR).getAbsolutePath();
+        String target = dir.getAbsolutePath();
         if (!target.startsWith(filesPath + File.separator)) {
             throw new IOException("refusing to wipe outside filesDir: " + dir);
         }

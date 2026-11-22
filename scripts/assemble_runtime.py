@@ -93,17 +93,21 @@ def assemble_bundle(source_repo: str, out_archive: str):
     root_nm_dsh = os.path.join(work_dir, "node_modules", "@deepseek-ai")
     os.makedirs(root_nm_dsh, exist_ok=True)
     for name, rel in symlinks.items():
+        if rel in (".", ""):
+            continue
         short_name = name.split("/", 1)[1]
         link_target = os.path.join("../../", rel)
         link_path = os.path.join(root_nm_dsh, short_name)
         if not os.path.exists(link_path) and not os.path.islink(link_path):
             os.symlink(link_target, link_path)
 
-    # apps/cli/node_modules/@deepseek-ai
+    # apps/cli/node_modules/@deepseek-ai (NEVER link apps/cli to itself to avoid circular symlink loop!)
     cli_dir = os.path.join(work_dir, "apps", "cli")
     cli_nm_dsh = os.path.join(cli_dir, "node_modules", "@deepseek-ai")
     os.makedirs(cli_nm_dsh, exist_ok=True)
     for name, rel in symlinks.items():
+        if rel in (".", "", "apps/cli") or rel.startswith("apps/cli"):
+            continue
         short_name = name.split("/", 1)[1]
         link_target = os.path.join("../../../../", rel)
         link_path = os.path.join(cli_nm_dsh, short_name)
