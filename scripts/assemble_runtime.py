@@ -60,16 +60,18 @@ def assemble_bundle(source_repo: str, out_archive: str):
 
     run(["tar", "-xzf", prebuilt_tmp, "-C", work_dir])
 
-    print("[*] 2. Copying package.json manifests and workspace metadata...")
+    print("[*] 2. Copying package manifests, cordis configs, and workspace metadata...")
     symlinks = {}
+    RUNTIME_EXTS = (
+        ".json", ".yml", ".yaml", ".sql", ".txt", ".html", ".css", ".svg", ".png", ".ico"
+    )
     for root, dirs, files in os.walk(source_repo):
-        # Skip node_modules, git, tests, benchmarks
-        dirs[:] = [d for d in dirs if d not in ("node_modules", ".git", "tests", "benchmarks", "docs")]
+        # Skip node_modules, git, tests, benchmarks, docs, and TypeScript source dirs
+        dirs[:] = [d for d in dirs if d not in ("node_modules", ".git", "tests", "benchmarks", "docs", "src")]
+        rel = os.path.relpath(root, source_repo)
+        dest_dir = os.path.join(work_dir, rel) if rel != "." else work_dir
+
         if "package.json" in files:
-            rel = os.path.relpath(root, source_repo)
-            dest_dir = os.path.join(work_dir, rel)
-            os.makedirs(dest_dir, exist_ok=True)
-            shutil.copy2(os.path.join(root, "package.json"), os.path.join(dest_dir, "package.json"))
             try:
                 with open(os.path.join(root, "package.json"), "r", encoding="utf-8") as f:
                     pj_data = json.load(f)
@@ -78,9 +80,11 @@ def assemble_bundle(source_repo: str, out_archive: str):
                         symlinks[name] = rel
             except Exception:
                 pass
-        for special_file in ("pnpm-workspace.yaml", ".npmrc"):
-            if special_file in files and root == source_repo:
-                shutil.copy2(os.path.join(root, special_file), os.path.join(work_dir, special_file))
+
+        for f in files:
+            if f.endswith(RUNTIME_EXTS) or f in ("pnpm-workspace.yaml", ".npmrc"):
+                os.makedirs(dest_dir, exist_ok=True)
+                shutil.copy2(os.path.join(root, f), os.path.join(dest_dir, f))
 
     print(f"[OK] Discovered and mapped {len(symlinks)} @deepseek-ai workspace packages.")
 
