@@ -95,15 +95,42 @@ public final class CoreLauncher {
             Log.i(TAG, "warm-boot fast-path hit (" + checkMs + "ms); launching node directly");
         } else {
             BootMetrics.setColdInstall(true);
-            // 2. Ensure Termux bootstrap is extracted first so node & bash are available
+
+            // 2 + 3. The userspace install (extract ~3s) and the runtime extract
+            // (~9s) write to completely independent directories and neither reads
+            // the other's output, yet they used to run strictly one after the
+            // other on the launch thread. On a cold install that serialised ~12s
+            // of I/O before node could even be forked, which on a slow device
+            // pushed total boot past the readiness budget and produced
+            // "core did not start". Run them concurrently and wait for both.
+            //
+            // The two tasks only touch:
+            //   userspace -> filesDir/usr (+ .gemini state)
+            //   runtime   -> filesDir/runtime (+ web assets)
+            // so there is no shared-write hazard. A userspace failure stays
+            // non-fatal (the core still runs from assets/runtime).
+            final Context ctxForEnv = context;
+            final RuntimeManager rmForCore = runtime;
+            final Throwable[] envFailure = new Throwable[1];
+
+            Thread coreThread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    long t = SystemClock.elapsedRealtime();
+                    rmForCore.installCore();
+                    BootMetrics.setCoreCheckMs(SystemClock.elapsedRealtime() - t);
+                }
+            }, "CoreInstallThread");
+            coreThread.setDaemon(true);
+
             long tEnv = SystemClock.elapsedRealtime();
-            if (!EnvInstaller.isInstalled(context)) {
-                Log.i(TAG, "First boot: installing Bionic userspace...");
+            coreThread.start();
+            if (!EnvInstaller.isInstalled(ctxForEnv)) {
+                Log.i(TAG, "First boot: installing Bionic userspace (in parallel with runtime extract)...");
                 try {
-                    EnvInstaller.install(context);
-                } catch (Exception e) {
-                    // A userspace failure must not abort the launch: the core still
-                    // runs from assets/runtime and the scheduler retries in background.
+                    EnvInstaller.install(ctxForEnv);
+                } catch (Throwable e) {
+                    envFailure[0] = e;
                     Log.e(TAG, "userspace install failed; continuing with runtime only: "
                             + e.getMessage(), e);
                     CoreRuntimeState.lastError = "userspace install failed: "
@@ -112,10 +139,13 @@ public final class CoreLauncher {
             }
             BootMetrics.setEnvCheckMs(SystemClock.elapsedRealtime() - tEnv);
 
-            // 3. Extract DeepSeek runtime bundle & web UI
-            long tCore = SystemClock.elapsedRealtime();
-            runtime.installCore();
-            BootMetrics.setCoreCheckMs(SystemClock.elapsedRealtime() - tCore);
+            // Wait for the runtime extract before forking; node needs bin.js.
+            try {
+                coreThread.join();
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new IOException("interrupted waiting for runtime extract", ie);
+            }
 
             // Persist composite stamp so subsequent launches hit the <1ms warm-boot path
             String installedEnvId = EnvInstaller.readInstalledBundleId(context);

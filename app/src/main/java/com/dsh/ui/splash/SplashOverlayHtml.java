@@ -14,6 +14,12 @@ public final class SplashOverlayHtml {
         if (splashView == null) {
             return;
         }
+        // Paint the native surface before loading: the overlay must never show
+        // the WebView's own (transparent/black) surface on its first frame.
+        try {
+            splashView.setBackgroundColor(SplashLoadingHtml.parseColor(backgroundColor));
+        } catch (Throwable ignored) {
+        }
         splashView.loadDataWithBaseURL("https://app.antigravity.local/",
                 getOverlayHtml(title, message, foregroundColor, backgroundColor, retryable),
                 "text/html", "utf-8", null);

@@ -9,6 +9,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.View;
 import android.view.Window;
@@ -24,6 +25,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 import com.dsh.bridge.AndroidBridge;
+import com.dsh.core.BootMetrics;
+import com.dsh.core.CoreReadyProbe;
 import com.dsh.core.CoreRuntimeState;
 import com.dsh.core.CoreServiceLauncher;
 import com.dsh.oauth.OAuthManager;
@@ -53,9 +56,26 @@ public class MainActivity extends Activity
     private static final int REQUEST_STORAGE = 100;
     private static final int REQUEST_FILE_CHOOSER = 1002;
     private static final int REQUEST_MEDIA_PERMISSIONS = 1003;
-    private static final long SPLASH_TIMEOUT_MS = 60000;
+    /**
+     * Fallback splash budget when no boot is in progress in this process (the
+     * activity was recreated with a service-owned core already running). This is
+     * the adaptive budget, not a fixed 60s: install phase + readiness budget +
+     * margin, hard-capped in {@link CoreReadyProbe}.
+     */
+    private static final long SPLASH_TIMEOUT_MS = CoreReadyProbe.splashDeadlineBootMs(0);
     private static final long POLL_STARTUP_INTERVAL_MS = 50;
     private static final long POLL_READY_INTERVAL_MS = 1000;
+    /**
+     * First-paint watchdog, armed when the app URL is handed to the WebView:
+     * the UI is revealed even if the page's ready signal never arrives. It is a
+     * backstop only; normally startup_ready.js -> onUiReady() or onPageFinished
+     * dismisses the splash much sooner.
+     */
+    private static final long SPLASH_WATCHDOG_MS = 15000;
+    /** Short fallback after onPageFinished, letting the page's own ready signal win. */
+    private static final long PAINT_FALLBACK_MS = 900;
+    /** How often the staged splash status line is refreshed from the boot phase. */
+    private static final long STATUS_REFRESH_MS = 250;
 
     public static volatile MainActivity activeActivity;
 
@@ -74,15 +94,42 @@ public class MainActivity extends Activity
     private boolean appLoaded = false;
     private boolean activityResumed = false;
     private int loadedGeneration = -1;
-    private long splashDeadline;
+    /** Boot-elapsed time at which the app URL was handed to the WebView (0 = not yet). */
+    private long appLoadedAtUptime = 0L;
+    private String lastStatusKey = null;
+    private boolean splashDismissed = false;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+
     private final Runnable splashWatchdog = new Runnable() {
         @Override
         public void run() {
-            if (appLoaded && !splash.isFatalShown()) {
-                Log.w(TAG, "watchdog: auto-dismissing splash after timeout");
+            if (splashDismissed) {
+                return;
+            }
+            if (!splash.isFatalShown()) {
+                Log.w(TAG, "watchdog: auto-dismissing splash; page ready signal never arrived");
                 dismissSplash();
+            }
+        }
+    };
+
+    /**
+     * Drives the staged splash text from the real boot phase, so the user sees
+     * "Preparing environment..." -> "Extracting runtime..." -> "Starting
+     * engine..." instead of a static three-dot screen for up to a minute (the
+     * three dots stay on screen; the text is added below them). It only runs
+     * while the splash is up, so it costs nothing once the UI is visible.
+     */
+    private final Runnable statusTicker = new Runnable() {
+        @Override
+        public void run() {
+            if (!activityResumed) {
+                return;
+            }
+            updateSplashStatus();
+            if (!splashDismissed) {
+                handler.postDelayed(this, STATUS_REFRESH_MS);
             }
         }
     };
@@ -107,8 +154,13 @@ public class MainActivity extends Activity
         if (error != null) {
             if (CoreRuntimeState.restarting) {
                 splash.showTransient(error);
-            } else {
+            } else if (!appLoaded || !splashDismissed) {
                 splash.showFatalError(error);
+            } else {
+                // The UI is already on screen; a later core failure must not
+                // cover the app again, it is surfaced inside the WebView.
+                Log.w(TAG, "post-paint core error: "
+                        + SensitiveDataRedactor.redactLine(error));
             }
             return;
         }
@@ -118,26 +170,103 @@ public class MainActivity extends Activity
                 appLoaded = true;
                 loadedGeneration = generation;
                 splash.clearFatal();
-                if (generation > 1) {
+                if (generation > 1 || splash.mode() != SplashController.MODE_LOADING) {
+                    // Post-restart reload (or recovering from a transient error
+                    // overlay): show the loading splash again, with staged text,
+                    // so the reload window is explained.
+                    splashDismissed = false;
+                    lastStatusKey = null;
                     splash.showLoading();
+                    splash.showStatus("Reloading interface...");
                 }
+                appLoadedAtUptime = SystemClock.elapsedRealtime();
+                BootMetrics.setPhase(BootMetrics.PHASE_LOADING_UI);
+                // Load immediately on serverUrl: the WebView starts fetching the
+                // instant the port is listening, in parallel with the splash fade.
                 webViewHost.loadApp();
                 handler.removeCallbacks(splashWatchdog);
-                handler.postDelayed(splashWatchdog, 10000);
+                handler.postDelayed(splashWatchdog, SPLASH_WATCHDOG_MS);
+                handler.removeCallbacks(statusTicker);
+                if (!splashDismissed) {
+                    handler.post(statusTicker);
+                }
             }
             return;
         }
         if (!appLoaded && CoreRuntimeState.serverUrl == null && !splash.isFatalShown()
-                && System.currentTimeMillis() > splashDeadline) {
-            splash.showFatalError("core did not start within " + (SPLASH_TIMEOUT_MS / 1000) + "s");
+                && bootElapsedMs() > splashDeadlineBudgetMs()) {
+            splash.showFatalError("core did not start within "
+                    + (splashDeadlineBudgetMs() / 1000) + "s");
         }
+    }
+
+    /** True boot elapsed time (survives an activity recreation mid-boot). */
+    private static long bootElapsedMs() {
+        return Math.max(0L, BootMetrics.bootElapsedMs());
+    }
+
+    /**
+     * Adaptive splash budget in boot-elapsed milliseconds: the measured install
+     * phase (userspace + runtime extract, ~12s cold on the target device) plus
+     * the core's readiness budget plus a margin, hard-capped by
+     * {@link CoreReadyProbe}. Never shorter than the supervisor's own wait, so
+     * the splash cannot fail before the supervisor reports a real error.
+     */
+    private static long splashDeadlineBudgetMs() {
+        long install = BootMetrics.cachedInstallElapsedMs();
+        long budget = CoreReadyProbe.splashDeadlineBootMs(install);
+        return budget > 0 ? budget : SPLASH_TIMEOUT_MS;
+    }
+
+    /** Publishes staged progress text for the splash from the current boot phase. */
+    private void updateSplashStatus() {
+        if (splash == null || splashDismissed || splash.isErrorMode() || splash.isFatalShown()) {
+            return;
+        }
+        int phase = BootMetrics.phase();
+        long installMs = CoreRuntimeState.installElapsedMs > 0
+                ? CoreRuntimeState.installElapsedMs
+                : BootMetrics.cachedInstallElapsedMs();
+        String text;
+        switch (phase) {
+            case BootMetrics.PHASE_CORE_STARTING:
+                text = installMs > 0
+                        ? "Starting engine... (environment ready in " + (installMs / 1000) + "s)"
+                        : "Starting engine...";
+                break;
+            case BootMetrics.PHASE_LOADING_UI:
+                text = "Loading interface...";
+                break;
+            case BootMetrics.PHASE_RESTARTING:
+                long backoff = BootMetrics.restartBackoffMs();
+                text = backoff > 0
+                        ? "Restarting engine in " + Math.max(1, backoff / 1000) + "s..."
+                        : "Restarting engine...";
+                break;
+            case BootMetrics.PHASE_STARTING:
+            default:
+                text = installMs > 0
+                        ? "Extracting runtime... (" + (installMs / 1000) + "s)"
+                        : "Preparing environment...";
+                break;
+        }
+        String key = phase + "|" + text;
+        if (key.equals(lastStatusKey)) {
+            return;
+        }
+        lastStatusKey = key;
+        splash.showStatus(text);
     }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        if (CoreRuntimeState.serverUrl == null) {
-            com.dsh.core.BootMetrics.resetSession();
+        // A session is claimed only once per process boot: if the activity is
+        // destroyed and recreated while the core is still starting, the splash
+        // keeps measuring from the real boot start instead of restarting its
+        // deadline. A user Retry clears the claim explicitly in retryCore().
+        if (CoreRuntimeState.serverUrl == null && !BootMetrics.activitySessionActive()) {
+            BootMetrics.resetSession();
         }
         activeActivity = this;
         requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -158,9 +287,9 @@ public class MainActivity extends Activity
         shizukuBridge = new ShizukuBridge(this);
         androidBridge = new AndroidBridge(this, runtimeManager, shizukuBridge, themeManager);
         androidBridge.setActivity(this);
-        com.dsh.core.BootMetrics.markWebviewInitStart();
+        BootMetrics.markWebviewInitStart();
         webViewHost = new WebViewHost(this, themeManager, oauthManager, androidBridge, this);
-        com.dsh.core.BootMetrics.markWebviewInitDone();
+        BootMetrics.markWebviewInitDone();
         webViewHost.setListener(this);
 
         rootLayout = new FrameLayout(this);
@@ -176,7 +305,11 @@ public class MainActivity extends Activity
 
         splash.installExitAnimation(this);
 
-        splashDeadline = System.currentTimeMillis() + SPLASH_TIMEOUT_MS;
+        CoreRuntimeState.readyBudgetMs = CoreReadyProbe.readyBudgetMs();
+        Log.i(TAG, "adaptive boot budget: ready=" + CoreRuntimeState.readyBudgetMs
+                + "ms install=" + BootMetrics.cachedInstallElapsedMs()
+                + "ms splash=" + splashDeadlineBudgetMs() + "ms cold="
+                + BootMetrics.wasColdInstall());
         requestAppPermissions();
     }
 
@@ -199,8 +332,16 @@ public class MainActivity extends Activity
         splash.clearFatal();
         appLoaded = false;
         loadedGeneration = -1;
-        splashDeadline = System.currentTimeMillis() + SPLASH_TIMEOUT_MS;
+        splashDismissed = false;
+        lastStatusKey = null;
+        appLoadedAtUptime = 0L;
+        // A retry after an explicit failure is a fresh attempt: give it the same
+        // adaptive budget instead of charging it against the failed boot.
+        BootMetrics.resetSession();
+        CoreRuntimeState.installElapsedMs = 0L;
+        CoreRuntimeState.readyBudgetMs = CoreReadyProbe.readyBudgetMs();
         splash.showLoading();
+        splash.showStatus("Preparing environment...");
         CoreServiceLauncher.stop(this);
         com.dsh.install.BootStateStamp.invalidate(this);
         try {
@@ -221,7 +362,24 @@ public class MainActivity extends Activity
     @Override
     public void onPageFinished(String url) {
         Log.i(TAG, "onPageFinished " + SensitiveDataRedactor.safeUrl(url));
-        if (url != null && (url.contains("127.0.0.1") || url.contains("localhost"))) {
+        if (url == null || (!url.contains("127.0.0.1") && !url.contains("localhost"))) {
+            return;
+        }
+        if (splashDismissed) {
+            return;
+        }
+        // The page finished loading; give the UI's own ready signal
+        // (startup_ready.js -> onUiReady) a short window to win, then reveal the
+        // WebView anyway so a missed signal can never leave the splash up.
+        WebView wv = getWebView();
+        if (wv != null) {
+            wv.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    dismissSplash();
+                }
+            }, PAINT_FALLBACK_MS);
+        } else {
             dismissSplash();
         }
     }
@@ -243,9 +401,16 @@ public class MainActivity extends Activity
     /** Idempotent; called when WebView finishes loading the core UI or on watchdog timeout. */
     public void dismissSplash() {
         handler.removeCallbacks(splashWatchdog);
-        Log.i(TAG, "dismissSplash: fading out splashView");
+        if (splashDismissed) {
+            return;
+        }
+        splashDismissed = true;
+        long paintDelayMs = appLoadedAtUptime > 0
+                ? SystemClock.elapsedRealtime() - appLoadedAtUptime : -1L;
+        Log.i(TAG, "dismissSplash: fading out splashView (boot elapsed "
+                + bootElapsedMs() + "ms, ui_load_to_paint=" + paintDelayMs + "ms)");
         splash.dismiss();
-        com.dsh.core.BootMetrics.markUiPaint();
+        BootMetrics.markUiPaint();
     }
 
     public WebView getWebView() {
@@ -294,6 +459,7 @@ public class MainActivity extends Activity
             activeActivity = null;
         }
         handler.removeCallbacks(splashWatchdog);
+        handler.removeCallbacks(statusTicker);
         if (splash != null) {
             splash.destroy();
         }
@@ -350,6 +516,7 @@ public class MainActivity extends Activity
     protected void onPause() {
         activityResumed = false;
         handler.removeCallbacks(pollServer);
+        handler.removeCallbacks(statusTicker);
         if (webViewHost != null) {
             AppLifecycle.pause(webViewHost.getWebView());
         }
@@ -372,6 +539,13 @@ public class MainActivity extends Activity
         refreshTheme();
         handler.removeCallbacks(pollServer);
         handler.post(pollServer);
+        handler.removeCallbacks(statusTicker);
+        if (!splashDismissed && splash != null) {
+            // The activity is visible now, so the splash is on screen: arms the
+            // staged status line and starts refreshing it from the boot phase.
+            splash.startLoadingClock();
+            handler.post(statusTicker);
+        }
     }
 
     private void refreshTheme() {

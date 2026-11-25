@@ -19,6 +19,13 @@ import java.io.Writer;
  * ready, then block until exit. Intentional stops end the loop; an unexpected
  * exit is auto-restarted with exponential backoff up to MAX_RESTARTS, the
  * budget refilling after SUSTAINED_READY_MS of uptime.
+ *
+ * <p>Readiness is progress-aware: a core that is still alive and still
+ * emitting output past the base timeout is booting slowly (measured node
+ * time-to-listen is 24-32s on the target device, with a long memory-pressure
+ * tail), so its deadline is extended while it keeps making progress. The whole
+ * cycle is still bounded by {@link CoreReadyProbe#supervisorBootBudgetMs()}, so
+ * a genuinely hung core fails closed instead of retrying forever.</p>
  */
 public final class CoreProcessSupervisor {
 
@@ -33,6 +40,10 @@ public final class CoreProcessSupervisor {
 
     private volatile Process process;
     private volatile boolean stopping = false;
+    /** Last time the core process produced a stdout/stderr line (0 = none yet). */
+    private volatile long lastCoreOutputAtMs = 0L;
+    /** Readiness budget actually used by the last attempt (reported on timeout). */
+    private volatile long lastReadyBudgetMs = CoreReadyProbe.READY_TIMEOUT_MS;
     private Thread worker;
     private final Object readyLock = new Object();
 
@@ -92,6 +103,7 @@ public final class CoreProcessSupervisor {
 
     private void runCoreLoop() {
         int attempt = 0;
+        long cycleStart = System.currentTimeMillis();
         while (!stopping) {
             Writer log = CoreLogWriter.open(appContext.getFilesDir());
             Writer errLog = CoreLogWriter.open(appContext.getFilesDir(), "core_stderr.log", CoreLogWriter.STDERR_MAX_BYTES);
@@ -102,8 +114,19 @@ public final class CoreProcessSupervisor {
                 CoreRuntimeState.httpBoundSeen = false;
                 openUrlWatcher.setReadyNotifier(this::notifyReadyLock);
                 CoreLogWriter.writeLine(log, "\n=== DeepSeek Core Launch (attempt " + (attempt + 1) + ") ===");
+                // Install phase (cold boot) happens inside launch(); cache its
+                // length so the splash deadline can be extended by the same
+                // amount the boot actually spent before node was forked.
+                lastCoreOutputAtMs = 0L;
                 Process proc = CoreLauncher.launch(runtime, appContext.getFilesDir());
                 process = proc;
+                // launch() does the pre-fork install phase (userspace + runtime
+                // extract) on a cold boot; publish its measured length so the
+                // splash deadline is extended by exactly what the boot spent
+                // before node was forked.
+                BootMetrics.markInstallPhaseDone();
+                CoreRuntimeState.installElapsedMs = BootMetrics.installElapsedMs();
+                BootMetrics.markCoreAttemptStart();
 
                 final Writer streamWriter = log;
                 final Writer errWriter = errLog;
@@ -126,15 +149,28 @@ public final class CoreProcessSupervisor {
                     CoreLogWriter.closeQuietly(errLog);
                     errLog = null;
                     int code = ProcessUtils.exitCode(proc);
+                    long bootCycleMs = System.currentTimeMillis() - cycleStart;
+                    boolean cycleExhausted = bootCycleMs >= CoreReadyProbe.supervisorBootBudgetMs();
                     if (CoreRuntimeState.lastError == null) {
-                        CoreRuntimeState.lastError =
-                                "core did not become ready within " + CoreReadyProbe.READY_TIMEOUT_MS + "ms"
-                                + (code != -1 ? " (exit code " + code + describeExitCode(code, appContext.getFilesDir()) + ")" : "");
+                        CoreRuntimeState.lastError = "core did not become ready within "
+                                + lastReadyBudgetMs + "ms"
+                                + (code != -1 ? " (exit code " + code + describeExitCode(code, appContext.getFilesDir()) + ")" : "")
+                                + (cycleExhausted ? " [boot budget exhausted after " + bootCycleMs + "ms]" : "");
                         CoreLogWriter.writeLine(log, CoreRuntimeState.lastError);
                     }
                     destroy(proc);
                     attempt++;
                     String tail = getLastLinesFromLog(appContext.getFilesDir(), 15);
+                    if (cycleExhausted) {
+                        CoreRuntimeState.restarting = false;
+                        CoreRuntimeState.lastError = "core did not become ready within the boot budget of "
+                                + (CoreReadyProbe.supervisorBootBudgetMs() / 1000) + "s"
+                                + (code != -1 ? " (last exit code " + code + describeExitCode(code, appContext.getFilesDir()) + ")" : "")
+                                + (tail.isEmpty() ? "" : "\n--- core.log tail ---\n" + tail);
+                        CoreLogWriter.writeLine(log, CoreRuntimeState.lastError);
+                        com.dsh.log.CrashRecorder.recordCrash(appContext, code, bootCycleMs, CoreRuntimeState.lastError, logBuffer);
+                        break;
+                    }
                     if (attempt > CoreRestartPolicy.MAX_RESTARTS) {
                         CoreRuntimeState.restarting = false;
                         CoreRuntimeState.lastError = "core failed to start after " + CoreRestartPolicy.MAX_RESTARTS
@@ -144,8 +180,21 @@ public final class CoreProcessSupervisor {
                         com.dsh.log.CrashRecorder.recordCrash(appContext, code, 0, CoreRuntimeState.lastError, logBuffer);
                         break;
                     }
-                    long delay = CoreRestartPolicy.delayFor(attempt);
+                    long remaining = CoreReadyProbe.supervisorBootBudgetMs()
+                            - (System.currentTimeMillis() - cycleStart);
+                    long delay = CoreRestartPolicy.delayForWithin(attempt, remaining);
+                    if (delay < 0) {
+                        CoreRuntimeState.restarting = false;
+                        CoreRuntimeState.lastError = "core startup failed (code " + code
+                                + describeExitCode(code, appContext.getFilesDir())
+                                + "); no boot budget left to retry"
+                                + (tail.isEmpty() ? "" : "\n--- core.log tail ---\n" + tail);
+                        CoreLogWriter.writeLine(log, CoreRuntimeState.lastError);
+                        com.dsh.log.CrashRecorder.recordCrash(appContext, code, bootCycleMs, CoreRuntimeState.lastError, logBuffer);
+                        break;
+                    }
                     CoreRuntimeState.restarting = true;
+                    BootMetrics.markRestarting(delay);
                     CoreRuntimeState.lastError = "core startup failed (code " + code + describeExitCode(code, appContext.getFilesDir())
                             + "); retrying in " + (delay / 1000) + "s (attempt "
                             + attempt + "/" + CoreRestartPolicy.MAX_RESTARTS + ")"
@@ -159,6 +208,10 @@ public final class CoreProcessSupervisor {
                     continue;
                 }
 
+                // The boot cycle succeeded: a later crash/restart is a fresh cycle
+                // with its own budget, so it is never starved by how long the
+                // first (slow) boot took.
+                cycleStart = System.currentTimeMillis();
                 // Trigger background env sync and daemon startup now that core is serving UI.
                 runtime.installEnvInBackground();
                 if (readyListener != null) {
@@ -190,6 +243,7 @@ public final class CoreProcessSupervisor {
                 if (System.currentTimeMillis() - readyAt >= CoreRestartPolicy.SUSTAINED_READY_MS) {
                     attempt = 0;
                 }
+                cycleStart = System.currentTimeMillis();
                 CoreRuntimeState.serverUrl = null;
                 CoreRuntimeState.detectedWebUrl = null;
                 attempt++;
@@ -204,8 +258,20 @@ public final class CoreProcessSupervisor {
                     com.dsh.log.CrashRecorder.recordCrash(appContext, code, System.currentTimeMillis() - readyAt, CoreRuntimeState.lastError, logBuffer);
                     break;
                 }
-                long delay = CoreRestartPolicy.delayFor(attempt);
+                long remaining = CoreReadyProbe.supervisorBootBudgetMs()
+                        - (System.currentTimeMillis() - cycleStart);
+                long delay = CoreRestartPolicy.delayForWithin(attempt, remaining);
+                if (delay < 0) {
+                    CoreRuntimeState.restarting = false;
+                    CoreRuntimeState.lastError = "core crashed " + attempt + " times and the boot budget is "
+                            + "exhausted; giving up (last exit code " + code + exitDesc + ")"
+                            + (tail.isEmpty() ? "" : "\n--- core.log tail ---\n" + tail);
+                    CoreLogWriter.writeLine(log, CoreRuntimeState.lastError);
+                    com.dsh.log.CrashRecorder.recordCrash(appContext, code, System.currentTimeMillis() - readyAt, CoreRuntimeState.lastError, logBuffer);
+                    break;
+                }
                 CoreRuntimeState.restarting = true;
+                BootMetrics.markRestarting(delay);
                 CoreRuntimeState.lastError = "core exited unexpectedly (code " + code + exitDesc
                         + "); restarting in " + (delay / 1000) + "s (attempt "
                         + attempt + "/" + CoreRestartPolicy.MAX_RESTARTS + ")"
@@ -232,11 +298,41 @@ public final class CoreProcessSupervisor {
         }
     }
 
+    /**
+     * Waits for the core's loopback port.
+     *
+     * <p>A live process that is still writing to its log/streams is making
+     * progress, so the deadline is extended (up to
+     * {@link CoreReadyProbe#MAX_PROGRESS_EXTENSIONS} times) instead of failing a
+     * slow boot. A silent or dead core is never extended, so genuine failures
+     * still fail closed with the original timeout message.</p>
+     */
     private boolean waitForReady(Process proc, Writer log) {
         long start = System.currentTimeMillis();
         long tcpOpenAt = -1L;
         int port = CoreRuntimeState.httpsPort;
-        while (System.currentTimeMillis() - start < CoreReadyProbe.READY_TIMEOUT_MS) {
+        long budget = lastReadyBudgetMs = CoreReadyProbe.readyBudgetMs();
+        long hardDeadline = start + CoreReadyProbe.READY_TIMEOUT_MAX_MS;
+        int extensions = 0;
+        long nextExtensionAt = start + budget;
+        while (true) {
+            long now = System.currentTimeMillis();
+            if (now >= nextExtensionAt) {
+                if (extensions < CoreReadyProbe.MAX_PROGRESS_EXTENSIONS
+                        && isMakingProgress(now)
+                        && now + CoreReadyProbe.PROGRESS_EXTENSION_MS <= hardDeadline) {
+                    extensions++;
+                    budget += CoreReadyProbe.PROGRESS_EXTENSION_MS;
+                    nextExtensionAt = start + budget;
+                    String note = "core still booting after " + (now - start) + "ms with recent output; "
+                            + "extending readiness budget to " + budget + "ms (extension "
+                            + extensions + "/" + CoreReadyProbe.MAX_PROGRESS_EXTENSIONS + ")";
+                    Log.i(TAG, note);
+                    CoreLogWriter.writeLine(log, note);
+                } else {
+                    break;
+                }
+            }
             if (stopping) {
                 return false;
             }
@@ -260,6 +356,7 @@ public final class CoreProcessSupervisor {
                     CoreRuntimeState.lastError = null;
                     CoreRuntimeState.restarting = false;
                     CoreRuntimeState.readyGeneration++;
+                    lastReadyBudgetMs = budget;
                     BootMetrics.markCoreReady();
                     String readyStatus = "core ready on 127.0.0.1:" + port + " (tokenized URL)";
                     Log.i(TAG, readyStatus);
@@ -271,6 +368,7 @@ public final class CoreProcessSupervisor {
                     CoreRuntimeState.lastError = null;
                     CoreRuntimeState.restarting = false;
                     CoreRuntimeState.readyGeneration++;
+                    lastReadyBudgetMs = budget;
                     BootMetrics.markCoreReady();
                     String readyStatus = "core ready on 127.0.0.1:" + port + " (fallback URL)";
                     Log.i(TAG, readyStatus);
@@ -289,7 +387,38 @@ public final class CoreProcessSupervisor {
                 }
             }
         }
+        long waitedMs = System.currentTimeMillis() - start;
+        String timeoutNote = "waitForReady timed out after " + waitedMs + "ms"
+                + " (base=" + CoreReadyProbe.readyBudgetMs() + "ms, extensions=" + extensions
+                + ", recentOutput=" + isMakingProgress(System.currentTimeMillis()) + ")";
+        Log.w(TAG, timeoutNote);
+        CoreLogWriter.writeLine(log, timeoutNote);
         return false;
+    }
+
+    /**
+     * True when the core is still alive and produced output recently, or when
+     * the boot phase was published recently (e.g. the install phase is still
+     * running on a cold start). This is what separates "slow" from "dead".
+     */
+    private boolean isMakingProgress(long now) {
+        Process proc = process;
+        if (proc != null && !ProcessUtils.isAlive(proc)) {
+            return false;
+        }
+        long lastOutput = lastCoreOutputAtMs;
+        if (lastOutput > 0 && now - lastOutput <= CoreReadyProbe.PROGRESS_STALL_MS) {
+            return true;
+        }
+        // The install phase (cold boot) produces no stdout of its own, but it
+        // publishes phases; a phase change is progress too.
+        if (lastOutput <= 0 && BootMetrics.progressElapsedMs() <= CoreReadyProbe.PROGRESS_STALL_MS) {
+            return true;
+        }
+        // A core that is alive but quiet can still be doing page-cache work, so
+        // give it one extension while the boot phase is still "starting core".
+        return BootMetrics.phase() == BootMetrics.PHASE_CORE_STARTING
+                && BootMetrics.progressElapsedMs() <= CoreReadyProbe.PROGRESS_STALL_MS * 2;
     }
 
     private void streamOutput(Process proc, Writer log) {
@@ -297,6 +426,8 @@ public final class CoreProcessSupervisor {
                 new InputStreamReader(proc.getInputStream()))) {
             String line;
             while ((line = reader.readLine()) != null) {
+                lastCoreOutputAtMs = System.currentTimeMillis();
+                BootMetrics.markProgress();
                 String safeLine = SensitiveDataRedactor.redactLine(line);
                 Log.d(TAG, safeLine);
                 if (logBuffer != null) {
@@ -317,6 +448,8 @@ public final class CoreProcessSupervisor {
                 new InputStreamReader(proc.getErrorStream()))) {
             String line;
             while ((line = reader.readLine()) != null) {
+                lastCoreOutputAtMs = System.currentTimeMillis();
+                BootMetrics.markProgress();
                 String safeLine = SensitiveDataRedactor.redactLine(line);
                 Log.w(TAG, "[stderr] " + safeLine);
                 if (logBuffer != null) {

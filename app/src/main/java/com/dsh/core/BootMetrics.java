@@ -8,10 +8,24 @@ import org.json.JSONObject;
 /**
  * Wall-clock startup telemetry across Application/Activity, Java installers,
  * Node process boot, and WebView first paint.
+ *
+ * <p>Also owns the coarse boot phase that the splash renders as status text:
+ * supervisors/services write it on any thread, the UI polls it from the main
+ * thread to advance the splash without the splash having to know about the
+ * installers.</p>
  */
 public final class BootMetrics {
 
     private static final String TAG = "BootMetrics";
+
+    /** Preparing/verifying the environment and extracting the runtime (pre-fork). */
+    public static final int PHASE_STARTING = 1;
+    /** The core process is forked; waiting for it to listen on the loopback port. */
+    public static final int PHASE_CORE_STARTING = 2;
+    /** The port is listening; the WebView is loading and painting. */
+    public static final int PHASE_LOADING_UI = 3;
+    /** An unexpected exit is being auto-restarted. */
+    public static final int PHASE_RESTARTING = 4;
 
     private static volatile long sStartMs = SystemClock.elapsedRealtime();
     private static volatile long sServiceStartMs;
@@ -24,6 +38,14 @@ public final class BootMetrics {
     private static volatile long sUiPaintMs;
     private static volatile boolean sColdInstall;
     private static volatile boolean sEmitted;
+
+    private static volatile int sPhase = PHASE_STARTING;
+    private static volatile long sPhaseSinceMs = SystemClock.elapsedRealtime();
+    /** True once a MainActivity has claimed the current boot session. */
+    private static volatile boolean sActivitySessionClaimed;
+    private static volatile long sCacheInstallElapsedMs;
+    private static volatile long sRestartBackoffMs;
+    private static volatile long sProgressMs = SystemClock.elapsedRealtime();
 
     private static volatile long sNodeLine1Ms = -1;
     private static volatile long sNodeModuleLoadMs = -1;
@@ -49,6 +71,25 @@ public final class BootMetrics {
         sNodeModuleLoadMs = -1;
         sNodeAppInitMs = -1;
         sNodeHttpListenMs = -1;
+        sCacheInstallElapsedMs = 0L;
+        sRestartBackoffMs = 0L;
+        sActivitySessionClaimed = true;
+        // Force the phase back to the start of a boot (setPhase() is monotonic and
+        // would ignore STARTING after LOADING_UI, e.g. on a user Retry).
+        sPhase = PHASE_STARTING;
+        sPhaseSinceMs = SystemClock.elapsedRealtime();
+        sProgressMs = sPhaseSinceMs;
+        Log.i(TAG, "boot session reset");
+    }
+
+    /**
+     * True when an activity already owns this boot session (the process kept
+     * booting while the activity was destroyed and recreated). The activity then
+     * must not reset the boot clock: the splash deadline is measured from the
+     * real boot start, not from the newest activity's onCreate.
+     */
+    public static boolean activitySessionActive() {
+        return sActivitySessionClaimed;
     }
 
     public static void ensureStart() {
@@ -57,9 +98,84 @@ public final class BootMetrics {
         }
     }
 
+    /** Milliseconds since this boot started (0 if no boot is in progress). */
+    public static long bootElapsedMs() {
+        long start = sStartMs;
+        if (start <= 0) {
+            return 0L;
+        }
+        return Math.max(0L, SystemClock.elapsedRealtime() - start);
+    }
+
+    /**
+     * Publishes the coarse boot phase. Monotonic for forward transitions
+     * (STARTING -> CORE_STARTING -> LOADING_UI) so a late service-start marker
+     * cannot move the splash backwards; RESTARTING is always honoured.
+     */
+    public static void setPhase(int phase) {
+        int previous = sPhase;
+        if (phase == previous) {
+            return;
+        }
+        if (phase < previous && phase != PHASE_RESTARTING && previous != PHASE_RESTARTING) {
+            return;
+        }
+        sPhase = phase;
+        sPhaseSinceMs = SystemClock.elapsedRealtime();
+        sProgressMs = sPhaseSinceMs;
+        Log.i(TAG, "boot phase=" + phase);
+    }
+
+    public static int phase() {
+        return sPhase;
+    }
+
+    /** Milliseconds spent in the current phase. */
+    public static long phaseElapsedMs() {
+        return Math.max(0L, SystemClock.elapsedRealtime() - sPhaseSinceMs);
+    }
+
+    /**
+     * Renews the liveness marker. Called on core stdout/stderr output and by
+     * every phase change, so the supervisor can tell "slow but progressing"
+     * from "dead or hung".
+     */
+    public static void markProgress() {
+        sProgressMs = SystemClock.elapsedRealtime();
+    }
+
+    /** Milliseconds since the last observed progress signal. */
+    public static long progressElapsedMs() {
+        return Math.max(0L, SystemClock.elapsedRealtime() - sProgressMs);
+    }
+
     public static void markServiceStart() {
         ensureStart();
         sServiceStartMs = SystemClock.elapsedRealtime();
+    }
+
+    /** Publishes the length of the pre-fork install phase (cold install only). */
+    public static void markInstallPhaseDone() {
+        long installMs = installElapsedMs();
+        if (installMs > 0) {
+            sCacheInstallElapsedMs = installMs;
+        }
+    }
+
+    /** Wall-clock length of the install phase (userspace + runtime extract) of the current boot. */
+    public static long installElapsedMs() {
+        long fork = sForkMs;
+        if (fork <= 0) {
+            return 0L;
+        }
+        long start = sStartMs > 0 ? sStartMs : fork;
+        return Math.max(0L, fork - start);
+    }
+
+    /** Install-phase length cached at fork time; survives a supervisor restart within one boot. */
+    public static long cachedInstallElapsedMs() {
+        long cached = sCacheInstallElapsedMs;
+        return cached > 0 ? cached : installElapsedMs();
     }
 
     public static void setEnvCheckMs(long ms) {
@@ -74,8 +190,26 @@ public final class BootMetrics {
         sColdInstall = cold;
     }
 
+    /** Whether the current boot extracts the userspace/runtime (used for the budget bonus). */
+    public static boolean wasColdInstall() {
+        return sColdInstall;
+    }
+
     public static void markFork() {
         sForkMs = SystemClock.elapsedRealtime();
+        setPhase(PHASE_CORE_STARTING);
+    }
+
+    /** Re-announces the forking phase for every supervisor attempt (not only the first). */
+    public static void markCoreAttemptStart() {
+        if (sForkMs <= 0) {
+            markFork();
+        } else {
+            setPhase(PHASE_CORE_STARTING);
+        }
+        // A fresh fork is a fresh progress signal, so a retry attempt gets its
+        // own liveness window even if the previous attempt ended a while ago.
+        markProgress();
     }
 
     public static void markWebviewInitStart() {
@@ -91,7 +225,19 @@ public final class BootMetrics {
 
     public static void markCoreReady() {
         sReadyMs = SystemClock.elapsedRealtime();
+        setPhase(PHASE_LOADING_UI);
     }
+
+    /** Publishes the restart phase with the current backoff, so the splash can count down. */
+    public static void markRestarting(long backoffMs) {
+        sRestartBackoffMs = Math.max(0L, backoffMs);
+        setPhase(PHASE_RESTARTING);
+    }
+
+    public static long restartBackoffMs() {
+        return sRestartBackoffMs;
+    }
+
 
     public static void markUiPaint() {
         if (sUiPaintMs > 0) {

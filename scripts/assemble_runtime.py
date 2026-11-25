@@ -8,6 +8,7 @@ Combines:
 4. Mobile runtime shims (@img/sharp-wasm32, @emnapi/runtime, android-arm64 pty.node)
 """
 import os
+import re
 import sys
 import shutil
 import subprocess
@@ -166,6 +167,220 @@ def flatten_pure_js_packages(root_nm: str, iso_dir: str):
             json.dump(pj, f, separators=(",", ":"))
         flattened += 1
     print(f"[OK] esbuild flattened {flattened} multi-file npm packages into single CJS bundles.")
+
+
+# Runtime-broken plugin rows: these two patches declare plugins whose own
+# import tree is not shipped (@opentelemetry/api-logs and friends are absent),
+# so every boot pays a full resolver walk + ERR_MODULE_NOT_FOUND stack format
+# for a plugin that can never activate. Telemetry is disabled by design anyway
+# (CoreEnvironment sets DSH_TELEMETRY_DISABLED=1), so the rows are removed from
+# the shipped patch layers and the packages are dropped from the archive.
+BROKEN_PLUGIN_IDS = ("otel", "session-telemetry-otel")
+BROKEN_PLUGIN_PACKAGES = (
+    "@deepseek-ai/dsh-otel",
+    "@deepseek-ai/dsh-session-telemetry-otel",
+)
+
+# Workspace trees that no shipped profile can activate: experimental plugins are
+# opt-in by definition, and test-support packages are only used by the repo's own
+# test suites. Removing them shrinks the archive and, more importantly, stops the
+# profile resolver from stat()ing their manifests at boot.
+BOOT_DEAD_PREFIXES = (
+    os.path.join("packages", "experimental") + os.sep,
+    os.path.join("packages", "test-support") + os.sep,
+)
+
+PATCH_YML_NAMES = ("cordis.patch.yml", "cordis.source.patch.yml")
+
+
+def read_json_file(path: str):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_json_file(path: str, data) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, separators=(",", ":"), ensure_ascii=False)
+
+
+def iter_package_manifests(work_dir: str):
+    """Yield (package_json_path, manifest, relative_dir) for every shipped package."""
+    for root, dirs, files in os.walk(work_dir):
+        dirs[:] = [d for d in dirs if d not in ("node_modules", ".git")]
+        if "package.json" not in files:
+            continue
+        path = os.path.join(root, "package.json")
+        try:
+            manifest = read_json_file(path)
+        except Exception:
+            continue
+        yield path, manifest, os.path.relpath(root, work_dir)
+
+
+def iter_patch_files(work_dir: str):
+    """Yield every shipped loader patch file (bundle layers + profile presets)."""
+    for root, dirs, files in os.walk(work_dir):
+        dirs[:] = [d for d in dirs if d not in ("node_modules", ".git")]
+        for name in files:
+            if name.endswith(".patch.yml") or name in PATCH_YML_NAMES:
+                yield os.path.join(root, name)
+
+
+def remove_yaml_rows(text: str, ids) -> tuple:
+    """Drop top-level YAML list items whose id is in ids, keeping the rest byte-identical.
+
+    The loader patches are hand-written YAML full of comments and !!js tags, so the
+    rows are removed textually instead of being re-serialized.
+    """
+    lines = text.splitlines(keepends=True)
+    removed = 0
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        match = None
+        for target in ids:
+            if re.match(r"^(\s*)-\s+id:\s*['\"]?" + re.escape(target) + r"['\"]?\s*$", line):
+                match = target
+                break
+        if match is None:
+            out.append(line)
+            i += 1
+            continue
+        indent = len(re.match(r"^(\s*)", line).group(1))
+        j = i + 1
+        while j < len(lines):
+            candidate = lines[j]
+            if candidate.strip() == "":
+                j += 1
+                continue
+            cand_indent = len(re.match(r"^(\s*)", candidate).group(1))
+            if cand_indent <= indent:
+                break
+            j += 1
+        removed += 1
+        i = j
+    return "".join(out), removed
+
+
+def prune_boot_dead_packages(work_dir: str) -> None:
+    """Remove packages that can never activate, plus their patch rows and declarations."""
+    referenced = set()
+    patch_paths = list(iter_patch_files(work_dir))
+    for path in patch_paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                referenced.update(re.findall(r"@deepseek-ai/[a-z0-9][a-z0-9-]*", f.read()))
+        except Exception:
+            continue
+
+    manifests_by_dir = {}
+    names_to_dir = {}
+    for path, manifest, rel in iter_package_manifests(work_dir):
+        manifests_by_dir[rel] = (path, manifest)
+        name = manifest.get("name")
+        if isinstance(name, str) and name not in names_to_dir:
+            names_to_dir[name] = rel
+
+    removed_names = set()
+    removed_dirs = []
+    for name in BROKEN_PLUGIN_PACKAGES:
+        rel = names_to_dir.get(name)
+        if rel is not None:
+            removed_names.add(name)
+            removed_dirs.append(rel)
+    for rel in list(manifests_by_dir):
+        if not rel.startswith(BOOT_DEAD_PREFIXES):
+            continue
+        name = manifests_by_dir[rel][1].get("name")
+        # A patch layer that still mounts the row keeps its package alive.
+        if isinstance(name, str) and name in referenced:
+            continue
+        if rel in removed_dirs:
+            continue
+        if isinstance(name, str):
+            removed_names.add(name)
+        removed_dirs.append(rel)
+
+    if not removed_dirs and not removed_names:
+        print("[*] 8b. No boot-dead packages to prune.")
+        return
+
+    freed_kb = 0
+    for rel in removed_dirs:
+        target = os.path.join(work_dir, rel)
+        if not os.path.isdir(target):
+            continue
+        for root, _dirs, files in os.walk(target):
+            for fn in files:
+                try:
+                    freed_kb += os.lstat(os.path.join(root, fn)).st_size // 1024
+                except OSError:
+                    pass
+        shutil.rmtree(target, ignore_errors=True)
+
+    # Remove the symlinks that pointed at the pruned package directories.
+    for root, dirs, _files in os.walk(os.path.join(work_dir, "node_modules")):
+        for d in list(dirs):
+            link = os.path.join(root, d)
+            if os.path.islink(link) and not os.path.exists(link):
+                try:
+                    os.remove(link)
+                except OSError:
+                    pass
+    for scope in ("@deepseek-ai",):
+        for base in ("node_modules", os.path.join("apps", "cli", "node_modules"),
+                     os.path.join("packages", "node_modules"),
+                     os.path.join("apps", "node_modules")):
+            scope_dir = os.path.join(work_dir, base, scope)
+            if not os.path.isdir(scope_dir):
+                continue
+            for entry in os.listdir(scope_dir):
+                link = os.path.join(scope_dir, entry)
+                if os.path.islink(link) and not os.path.exists(link):
+                    try:
+                        os.remove(link)
+                    except OSError:
+                        pass
+
+    # Drop dependency declarations for packages that no longer exist, so the boot
+    # resolver stops probing for them (a missing name costs a stat walk per anchor).
+    dropped_decls = 0
+    for rel, (path, manifest) in manifests_by_dir.items():
+        if rel in removed_dirs:
+            continue
+        changed = False
+        for field in ("dependencies", "peerDependencies", "optionalDependencies", "devDependencies"):
+            declared = manifest.get(field)
+            if not isinstance(declared, dict):
+                continue
+            for name in list(declared):
+                if name in removed_names:
+                    del declared[name]
+                    dropped_decls += 1
+                    changed = True
+        if changed:
+            write_json_file(path, manifest)
+
+    # Neutralize the broken plugin rows so no failed import is attempted at boot.
+    rows_removed = 0
+    for path in patch_paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except Exception:
+            continue
+        if not any(f"- id: {pid}" in text for pid in BROKEN_PLUGIN_IDS):
+            continue
+        new_text, count = remove_yaml_rows(text, BROKEN_PLUGIN_IDS)
+        if count:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(new_text)
+            rows_removed += count
+
+    print(f"[OK] Pruned {len(removed_dirs)} boot-dead packages (~{freed_kb / 1024:.1f} MB), "
+          f"{len(removed_names)} names, {dropped_decls} dependency declarations, "
+          f"{rows_removed} broken plugin rows.")
 
 
 def normalize_arch(arch: str) -> str:
