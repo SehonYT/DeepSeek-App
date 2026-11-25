@@ -23,13 +23,20 @@ normalize_arch() {
 build_bootstrap_tar() {
     local zip="$ENV_DIR/bootstrap/bootstrap-aarch64.zip"
     local out="$ENV_DIR/bootstrap/bootstrap.tar.gz"
+    local deb_dir="$ENV_DIR/packages/aarch64"
     if [ ! -f "$zip" ]; then
         log "Downloading Termux bootstrap-aarch64.zip..."
         curl -sSL "https://github.com/termux/termux-packages/releases/download/bootstrap-2026.11.15-r1%2Bapt.android-7/bootstrap-aarch64.zip" -o "$zip" || true
     fi
     [ -f "$zip" ] || { log "missing $zip"; return 1; }
+    log "Resolving 64-bit ARM nodejs, sqlite, and git packages..."
+    python3 "$ENV_DIR/scripts/fetch_termux_debs.py" \
+        --arch aarch64 \
+        --bootstrap-zip "$zip" \
+        --out-dir "$deb_dir" \
+        nodejs sqlite git || true
     local extra_args=()
-    for deb in "$ENV_DIR/packages"/*.deb; do
+    for deb in "$ENV_DIR/packages"/*.deb "$deb_dir"/*.deb; do
         [ -f "$deb" ] && extra_args+=("--extra-deb" "$deb")
     done
     python3 "$ENV_DIR/scripts/pack_bootstrap.py" --zip "$zip" --out "$out" "${extra_args[@]}"
@@ -39,13 +46,29 @@ build_bootstrap_tar() {
 build_bootstrap_arm_tar() {
     local zip="$ENV_DIR/bootstrap/bootstrap-arm.zip"
     local out="$ENV_DIR/bootstrap/bootstrap-arm.tar.gz"
+    local deb_dir="$ENV_DIR/packages/arm"
     if [ ! -f "$zip" ]; then
         log "Downloading Termux bootstrap-arm.zip..."
         curl -sSL "https://github.com/termux/termux-packages/releases/download/bootstrap-2026.11.15-r1%2Bapt.android-7/bootstrap-arm.zip" -o "$zip" || true
     fi
     [ -f "$zip" ] || { log "missing $zip"; return 1; }
-    python3 "$ENV_DIR/scripts/pack_bootstrap.py" --zip "$zip" --out "$out"
+    log "Resolving 32-bit ARM nodejs, sqlite, and git packages..."
+    python3 "$ENV_DIR/scripts/fetch_termux_debs.py" \
+        --arch arm \
+        --bootstrap-zip "$zip" \
+        --out-dir "$deb_dir" \
+        nodejs sqlite git
+    local extra_args=()
+    for deb in "$deb_dir"/*.deb; do
+        [ -f "$deb" ] && extra_args+=("--extra-deb" "$deb")
+    done
+    python3 "$ENV_DIR/scripts/pack_bootstrap.py" --zip "$zip" --out "$out" "${extra_args[@]}"
     log "bootstrap-arm.tar.gz: $(du -h "$out" | cut -f1)"
+}
+
+bootstrap_arm_has_node() {
+    local out="$ENV_DIR/bootstrap/bootstrap-arm.tar.gz"
+    [ -f "$out" ] && (tar -tzf "$out" ./bin/node >/dev/null 2>&1 || tar -tzf "$out" bin/node >/dev/null 2>&1)
 }
 
 pack_assets() {
@@ -60,10 +83,10 @@ pack_assets() {
         cp -f "$ENV_DIR/bootstrap/bootstrap.tar.gz" "$ASSETS/env/bootstrap/"
     fi
     if [ "$arch" = "universal" ]; then
-        [ -f "$ENV_DIR/bootstrap/bootstrap-arm.tar.gz" ] || build_bootstrap_arm_tar || true
+        bootstrap_arm_has_node || build_bootstrap_arm_tar || true
         [ -f "$ENV_DIR/bootstrap/bootstrap-arm.tar.gz" ] && cp -f "$ENV_DIR/bootstrap/bootstrap-arm.tar.gz" "$ASSETS/env/bootstrap/" || true
     elif [ "$arch" = "armeabi-v7a" ]; then
-        [ -f "$ENV_DIR/bootstrap/bootstrap-arm.tar.gz" ] || build_bootstrap_arm_tar
+        bootstrap_arm_has_node || build_bootstrap_arm_tar
         cp -f "$ENV_DIR/bootstrap/bootstrap-arm.tar.gz" "$ASSETS/env/bootstrap/"
     fi
 
@@ -97,7 +120,15 @@ while [ $# -gt 0 ]; do
 done
 
 case "$ACTION" in
-    bootstrap) build_bootstrap_tar; build_bootstrap_arm_tar ;;
+    bootstrap)
+        arch="$(normalize_arch "$TARGET_ARCH")"
+        if [ "$arch" = "universal" ] || [ "$arch" = "arm64-v8a" ]; then
+            build_bootstrap_tar
+        fi
+        if [ "$arch" = "universal" ] || [ "$arch" = "armeabi-v7a" ]; then
+            build_bootstrap_arm_tar
+        fi
+        ;;
     assets)    pack_assets ;;
     all)       pack_assets ;;
 esac

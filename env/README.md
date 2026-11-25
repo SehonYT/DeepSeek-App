@@ -41,7 +41,6 @@ env/
 │   │   ├── profile         # Корневой профиль bash-сессии
 │   │   └── resolv.conf     # Публичные DNS-серверы (1.1.1.1, 8.8.8.8)
 │   └── lib/                # Системные разделяемые библиотеки
-│       ├── libtermux-exec.so # Библиотека перехвата execve для трансляции путей
 │       └── daemon/         # Модули Python для dsh-daemon (executor.py и др.)
 ├── pkg/                    # Гибридный пакетный менеджер pkg (Python pkg_core + Bash/AWK fallback)
 │   ├── pkg                 # Исполняемый интерфейс командной строки (CLI)

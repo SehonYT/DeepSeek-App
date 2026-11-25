@@ -90,7 +90,12 @@ load_conf() {
     : "${PKG_REPOS:=https://packages.termux.dev/apt/termux-main}"
     : "${PKG_CHANNEL:=stable}"
     : "${PKG_COMPONENT:=main}"
-    : "${PKG_ARCH:=aarch64}"
+    if [ -z "${PKG_ARCH:-}" ]; then
+        case "$(uname -m 2>/dev/null || echo aarch64)" in
+            armv7*|armv8l|arm*) PKG_ARCH=arm ;;
+            *) PKG_ARCH=aarch64 ;;
+        esac
+    fi
     # data.tar paths are ./data/data/com.<id>/files/usr/... -> 6 components.
     # deb_files strips by component count, not by a hardcoded prefix string.
     : "${PKG_DEB_STRIP:=6}"

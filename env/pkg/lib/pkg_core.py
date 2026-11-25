@@ -8,6 +8,7 @@ import hashlib
 import io
 import lzma
 import os
+import platform
 import posixpath
 import re
 import shutil
@@ -24,6 +25,13 @@ PREFIX_RE_STR = re.compile(r"/data/(?:data|user/[0-9]+)/[^/\s'\";:<>()]*/files/u
 TERMUX_DATA_PREFIX_RE = re.compile(
     r"^(?:\./)?data/(?:data|user/[0-9]+)/[A-Za-z0-9][A-Za-z0-9+._-]*/files/usr(?:/(.*))?$"
 )
+def default_termux_arch() -> str:
+    mach = platform.machine().lower()
+    if mach.startswith(("armv7", "armv8l", "arm")):
+        return "arm"
+    return "aarch64"
+
+
 PKG_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._-]*$")
 VER_CONSTRAINT_RE = re.compile(r"^([^\s(\[:]+)\s*(?:\(([^)]+)\))?")
 
@@ -239,7 +247,7 @@ def sync_dpkg_status(prefix: str, pkg_db: str) -> int:
                 tmp_m = f"{meta_path}.tmp.{os.getpid()}"
                 tmp_f = f"{files_path}.tmp.{os.getpid()}"
                 with open(tmp_m, "w", encoding="utf-8") as mf:
-                    mf.write(f"name={pkg}\nversion={ver}\narch={arch or 'aarch64'}\n")
+                    mf.write(f"name={pkg}\nversion={ver}\narch={arch or default_termux_arch()}\n")
                 with open(tmp_f, "w", encoding="utf-8"):
                     pass
                 os.replace(tmp_m, meta_path)
@@ -880,7 +888,7 @@ def cmd_plan(args) -> int:
         rows.append((
             n,
             cols[1] or "0",
-            cols[2] or "aarch64",
+            cols[2] or default_termux_arch(),
             fn,
             url,
             str(sz),

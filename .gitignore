@@ -12,6 +12,8 @@ tools/r8.jar
 tools/debug.keystore
 vendor/*
 !vendor/native/
+env/packages/arm/
+env/packages/aarch64/
 
 # Archives and binaries
 *.tar

@@ -85,17 +85,30 @@ jobs:
             curl -fsSL -o tools/r8.jar "https://dl.google.com/dl/android/maven2/com/android/tools/r8/8.2.42/r8-8.2.42.jar"
           fi
 
-      - name: Assemble DeepSeek Harness Runtime Bundle
+      - name: Cross-Compile 32-bit node-pty (android-arm/pty.node)
         run: |
           mkdir -p archives
-          echo "[CI] 1. Cloning deepseek-harness source..."
+          echo "[CI] Cloning deepseek-harness source..."
           git clone --depth 1 https://github.com/salmanbappi/deepseek-harness.git archives/dsh-source
 
-          echo "[CI] 2. Assembling compact runtime bundle (<= 45MB)..."
-          python3 scripts/assemble_runtime.py archives/dsh-source archives/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz
+          if [ ! -f "vendor/native/android-arm/pty.node" ]; then
+            echo "[CI] Building 32-bit armeabi-v7a pty.node with Android NDK..."
+            bash scripts/build_pty_node.sh --arch android-arm --dsh-source archives/dsh-source
+          fi
+          ls -lh vendor/native/android-arm64/pty.node vendor/native/android-arm/pty.node
 
-          echo "[CI] 3. Verifying assembled archive..."
-          ls -lh archives/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz
+      - name: Assemble DeepSeek Harness Runtime Bundles (Universal & Split ABIs)
+        run: |
+          for arch in universal arm64-v8a armeabi-v7a; do
+            echo "[CI] Assembling runtime bundle for $arch..."
+            python3 scripts/assemble_runtime.py --arch "$arch" archives/dsh-source "archives/dsh-termux-prebuilt-v0.2.2-rc.3-${arch}.tar.gz"
+          done
+          ls -lh archives/dsh-termux-prebuilt-*.tar.gz
+
+      - name: Ensure Complete 32-bit Termux Bootstrap (with Node.js, SQLite, Git)
+        run: |
+          bash env/build.sh --arch armeabi-v7a assets
+          ls -lh env/bootstrap/bootstrap.tar.gz env/bootstrap/bootstrap-arm.tar.gz
 
       - name: Sync App Version from Tag
         run: |
@@ -125,6 +138,12 @@ jobs:
       - name: Build DeepSeek Dev APK (dist/deepseek-dev.apk)
         run: |
           bash build.sh --dev --arch universal
+
+      - name: Verify APK ABI Integrity
+        run: |
+          python3 scripts/verify_apk_abi.py dist/deepseek.apk --arch universal
+          python3 scripts/verify_apk_abi.py dist/deepseek-arm64-v8a.apk --arch arm64-v8a
+          python3 scripts/verify_apk_abi.py dist/deepseek-armeabi-v7a.apk --arch armeabi-v7a
 
       - name: Compute Cryptographic Checksums
         run: |

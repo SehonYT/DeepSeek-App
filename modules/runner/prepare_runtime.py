@@ -55,17 +55,25 @@ def find_dsh_source():
     return None
 
 
-def find_prebuilt_archive():
-    candidates = []
-    for search_dir in [
+def find_prebuilt_archive(target_arch: str = None):
+    target_arch = (target_arch or os.environ.get("TARGET_ARCH") or "").strip().lower()
+    search_dirs = [
         os.path.join(PROJECT_ROOT, "archives"),
         os.path.join(PROJECT_ROOT, "vendor"),
         os.path.expanduser("~/workspace/archives"),
         os.path.expanduser("~/deepseek-harness"),
-    ]:
+    ]
+    if target_arch:
+        for search_dir in search_dirs:
+            if os.path.isdir(search_dir):
+                arch_matches = sorted(glob.glob(os.path.join(search_dir, f"*dsh*prebuilt*{target_arch}*.tar.gz")))
+                if arch_matches:
+                    return arch_matches[0]
+    candidates = []
+    for search_dir in search_dirs:
         if os.path.isdir(search_dir):
-            candidates.extend(glob.glob(os.path.join(search_dir, "*dsh*prebuilt*.tar.gz")))
-            candidates.extend(glob.glob(os.path.join(search_dir, "dsh*.tar.gz")))
+            candidates.extend(sorted(glob.glob(os.path.join(search_dir, "*dsh*prebuilt*.tar.gz"))))
+            candidates.extend(sorted(glob.glob(os.path.join(search_dir, "dsh*.tar.gz"))))
     if candidates:
         return candidates[0]
     return None
