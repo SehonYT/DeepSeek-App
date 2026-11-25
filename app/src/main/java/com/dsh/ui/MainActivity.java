@@ -227,15 +227,18 @@ public class MainActivity extends Activity
         long installMs = CoreRuntimeState.installElapsedMs > 0
                 ? CoreRuntimeState.installElapsedMs
                 : BootMetrics.cachedInstallElapsedMs();
+        // Elapsed seconds of the current phase. Time-to-listen alone is 24-32s
+        // on the target device, so a static "Starting engine..." would look
+        // frozen for most of the boot; ticking proves the app is still working.
+        long phaseSeconds = Math.max(0L, BootMetrics.phaseElapsedMs()) / 1000L;
+        String elapsed = phaseSeconds >= 3 ? " (" + phaseSeconds + "s)" : "";
         String text;
         switch (phase) {
             case BootMetrics.PHASE_CORE_STARTING:
-                text = installMs > 0
-                        ? "Starting engine... (environment ready in " + (installMs / 1000) + "s)"
-                        : "Starting engine...";
+                text = "Starting engine..." + elapsed;
                 break;
             case BootMetrics.PHASE_LOADING_UI:
-                text = "Loading interface...";
+                text = "Loading interface..." + elapsed;
                 break;
             case BootMetrics.PHASE_RESTARTING:
                 long backoff = BootMetrics.restartBackoffMs();
@@ -245,9 +248,11 @@ public class MainActivity extends Activity
                 break;
             case BootMetrics.PHASE_STARTING:
             default:
+                // The install phase has no sub-phase markers of its own, so the
+                // measured total is the best progress signal available.
                 text = installMs > 0
-                        ? "Extracting runtime... (" + (installMs / 1000) + "s)"
-                        : "Preparing environment...";
+                        ? "Extracting runtime..." + elapsed + " (took " + (installMs / 1000) + "s)"
+                        : "Preparing environment..." + elapsed;
                 break;
         }
         String key = phase + "|" + text;
@@ -261,12 +266,19 @@ public class MainActivity extends Activity
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // A session is claimed only once per process boot: if the activity is
-        // destroyed and recreated while the core is still starting, the splash
-        // keeps measuring from the real boot start instead of restarting its
-        // deadline. A user Retry clears the claim explicitly in retryCore().
-        if (CoreRuntimeState.serverUrl == null && !BootMetrics.activitySessionActive()) {
-            BootMetrics.resetSession();
+        // A live boot keeps its original clock: if the activity is destroyed and
+        // recreated while the core is still starting, the splash must keep
+        // measuring from the real boot start instead of restarting the deadline.
+        // A session with no live boot behind it (service stopped, app idle for
+        // long, then relaunched into this process) is stale and MUST be reset,
+        // otherwise the new boot would be judged against an hours-old clock and
+        // fail closed immediately with "core did not start".
+        if (CoreRuntimeState.serverUrl == null) {
+            boolean liveBoot = BootMetrics.activitySessionActive()
+                    && BootMetrics.progressElapsedMs() < CoreReadyProbe.supervisorBootBudgetMs();
+            if (!liveBoot) {
+                BootMetrics.resetSession();
+            }
         }
         activeActivity = this;
         requestWindowFeature(Window.FEATURE_NO_TITLE);

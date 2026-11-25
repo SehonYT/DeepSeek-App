@@ -265,14 +265,7 @@ def remove_yaml_rows(text: str, ids) -> tuple:
 
 def prune_boot_dead_packages(work_dir: str) -> None:
     """Remove packages that can never activate, plus their patch rows and declarations."""
-    referenced = set()
     patch_paths = list(iter_patch_files(work_dir))
-    for path in patch_paths:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                referenced.update(re.findall(r"@deepseek-ai/[a-z0-9][a-z0-9-]*", f.read()))
-        except Exception:
-            continue
 
     manifests_by_dir = {}
     names_to_dir = {}
@@ -281,6 +274,51 @@ def prune_boot_dead_packages(work_dir: str) -> None:
         name = manifest.get("name")
         if isinstance(name, str) and name not in names_to_dir:
             names_to_dir[name] = rel
+
+    # Collect every *external* mention of a package name. A package's own
+    # package.json declares its own "name", which must not count as a reference --
+    # otherwise every package looks referenced and nothing is ever pruned. So a
+    # mention is only counted when the referring directory is a different package.
+    # This is deliberately conservative: keeping bytes on disk is cheap, while
+    # removing a package that some profile preset or JS import still mounts leaves
+    # a dangling reference that fails at boot (the exact bug we already hit once).
+    referenced = set()
+    token_re = re.compile(r"@deepseek-ai/[a-z0-9][a-z0-9-]*")
+    for root, dirs, files in os.walk(work_dir):
+        dirs[:] = [d for d in dirs if d not in ("node_modules", ".git")]
+        rel_dir = os.path.relpath(root, work_dir)
+        if rel_dir == ".":
+            rel_dir = ""
+        for name in files:
+            if not name.endswith((".yml", ".yaml", ".json", ".mjs", ".cjs", ".js")):
+                continue
+            try:
+                with open(os.path.join(root, name), "r", encoding="utf-8", errors="ignore") as f:
+                    tokens = set(token_re.findall(f.read()))
+            except Exception:
+                continue
+            for token in tokens:
+                if names_to_dir.get(token) != rel_dir:
+                    referenced.add(token)
+
+    # node_modules is excluded above for speed, but a third-party manifest may still
+    # declare one of our packages as a dependency. Scan only its package.json files
+    # so that declaration survives pruning.
+    nm_root = os.path.join(work_dir, "node_modules")
+    for root, dirs, files in os.walk(nm_root):
+        if "package.json" not in files:
+            continue
+        try:
+            with open(os.path.join(root, "package.json"), "r", encoding="utf-8", errors="ignore") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        for field in ("dependencies", "peerDependencies", "optionalDependencies"):
+            declared = data.get(field)
+            if isinstance(declared, dict):
+                referenced.update(k for k in declared if isinstance(k, str))
 
     removed_names = set()
     removed_dirs = []
@@ -704,6 +742,9 @@ module.exports.default = module.exports;
         for f in ["patch_termux.py", "dsh_arch.py"]:
             if os.path.exists(os.path.join(work_dir, f)):
                 os.remove(os.path.join(work_dir, f))
+
+    print("[*] 8a. Pruning boot-dead packages and broken plugin rows...")
+    prune_boot_dead_packages(work_dir)
 
     print("[*] 8. Pruning development and test files...")
     for root, dirs, files in os.walk(work_dir, topdown=False):

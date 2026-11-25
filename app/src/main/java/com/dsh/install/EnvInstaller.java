@@ -418,13 +418,13 @@ public final class EnvInstaller {
         // either form when validating the tree.
         requireAny(new File(prefix, "lib"), "libsqlite3.so", "libsqlite3.so");
         requireFile(new File(prefix, "lib/libtermux-exec.so"), "libtermux-exec.so");
-        if (minimumSymlinks > 0) {
-            int actual = countSymlinks(prefix);
-            if (actual < minimumSymlinks) {
-                throw new IllegalStateException("bootstrap symlink set incomplete: " + actual
-                        + " < " + minimumSymlinks);
-            }
-        }
+        // NOTE: no countSymlinks() pass here. BootstrapExtractor.extract() already
+        // counts materialized symlinks while streaming the archive and fails closed
+        // when the count is short of the manifest value, so re-walking the whole
+        // extracted tree just to recount them was a duplicate pass over thousands of
+        // entries on the cold-install critical path.
+        // minimumSymlinks stays in the signature: it documents the manifest contract
+        // at every call site and keeps both callers source-compatible.
     }
 
     private static void requireFile(File file, String name) {
@@ -456,22 +456,6 @@ public final class EnvInstaller {
         if (!hasLibrary(dir, baseName)) {
             throw new IllegalStateException("required env file missing: " + label + " in " + dir);
         }
-    }
-
-    private static int countSymlinks(File dir) {
-        File[] children = dir.listFiles();
-        if (children == null) {
-            return 0;
-        }
-        int count = 0;
-        for (File child : children) {
-            if (TextFileDetector.isSymlink(child)) {
-                count++;
-            } else if (child.isDirectory()) {
-                count += countSymlinks(child);
-            }
-        }
-        return count;
     }
 
     private static Properties readState(File marker) {
