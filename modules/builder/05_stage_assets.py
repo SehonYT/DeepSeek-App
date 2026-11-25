@@ -6,6 +6,8 @@ import sys
 import os
 import shutil
 import subprocess
+import json
+import hashlib
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
