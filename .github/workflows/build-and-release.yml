@@ -4,10 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-    branches:
-      - main
-      - master
-      - dev
   workflow_dispatch:
     inputs:
       tag_name:
@@ -22,6 +18,10 @@ on:
         description: 'Mark as Pre-release'
         type: boolean
         default: false
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
