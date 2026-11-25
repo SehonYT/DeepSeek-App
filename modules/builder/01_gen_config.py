@@ -36,6 +36,7 @@ def main():
     env = parse_env(env_file)
 
     is_dev = os.environ.get("DEV_MODE") == "1"
+    target_arch = os.environ.get("TARGET_ARCH", "universal")
 
     pkg_base = env.get("PKG", "com.dsh")
     app_id = env.get("PKG_DEV", "com.dsh.dev") if is_dev else pkg_base
@@ -73,6 +74,7 @@ def main():
         f.write("    public static final String APP_NAME = %s;\n" % java_string(app_name))
         f.write("    public static final int MIN_API = %s;\n" % min_api)
         f.write("    public static final int TARGET_SDK = %s;\n" % target_sdk)
+        f.write("    public static final String TARGET_ARCH = %s;\n" % java_string(target_arch))
         f.write("    public static final boolean DEBUG = %s;\n" % is_debug)
         f.write("}\n")
 

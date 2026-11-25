@@ -68,18 +68,30 @@ public final class EnvInstaller {
         validatePrefixLocation(ctx, prefix);
 
         EnvBundleManifest manifest = EnvBundleManifest.load(assets);
-        String bootstrapAsset = null;
+        String bootstrapAsset;
         if (is32BitUserspace()) {
             bootstrapAsset = AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP_ARM);
-            if (bootstrapAsset != null) {
-                Log.i(TAG, "32-bit Android userspace detected without linker64; using 32-bit ARM bootstrap: " + bootstrapAsset);
+            if (bootstrapAsset == null) {
+                throw new IllegalStateException(
+                        "32-bit device requires armeabi-v7a or universal APK (missing "
+                                + EnvPaths.ASSET_BOOTSTRAP_ARM + ")");
             }
-        }
-        if (bootstrapAsset == null) {
+            Log.i(TAG, "32-bit Android userspace detected without linker64; using 32-bit ARM bootstrap: " + bootstrapAsset);
+        } else {
             bootstrapAsset = AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP, EnvPaths.ASSET_BOOTSTRAP_PLAIN);
-        }
-        if (bootstrapAsset == null) {
-            throw new IllegalStateException("required asset missing: " + EnvPaths.ASSET_BOOTSTRAP);
+            if (bootstrapAsset == null) {
+                // Allow running an armeabi-v7a APK on a 64-bit device if it supports 32-bit ABIs.
+                boolean supports32Bit = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.LOLLIPOP
+                        || (android.os.Build.SUPPORTED_32_BIT_ABIS != null
+                        && android.os.Build.SUPPORTED_32_BIT_ABIS.length > 0);
+                if (supports32Bit) {
+                    bootstrapAsset = AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP_ARM);
+                }
+                if (bootstrapAsset == null) {
+                    throw new IllegalStateException("required bootstrap asset missing for this device ABI");
+                }
+                Log.i(TAG, "using bundled 32-bit ARM bootstrap on 64-bit device with 32-bit ABI support: " + bootstrapAsset);
+            }
         }
         if (isInstalled(ctx)) {
             updateManagedLayers(ctx, assets, prefix, bootstrapAsset, manifest);
@@ -118,10 +130,8 @@ public final class EnvInstaller {
             }
             String targetPrefix = prefix.getAbsolutePath();
             boolean isArm = EnvPaths.ASSET_BOOTSTRAP_ARM.equals(bootstrapAsset);
-            String expectedSha = (isArm && manifest.bootstrapArmSha256 != null)
-                    ? manifest.bootstrapArmSha256 : manifest.bootstrapSha256;
-            int expectedSymlinks = (isArm && manifest.bootstrapArmSymlinkCount > 0)
-                    ? manifest.bootstrapArmSymlinkCount : manifest.bootstrapSymlinkCount;
+            String expectedSha = manifest.expectedBootstrapSha256(isArm);
+            int expectedSymlinks = manifest.expectedSymlinkCount(isArm);
             BootstrapExtractor.extract(assets, bootstrapAsset, stage,
                     expectedSha, expectedSymlinks);
             OverlayCopier.overlay(assets, EnvPaths.ASSET_OVERLAY, stage);
@@ -183,14 +193,16 @@ public final class EnvInstaller {
         // A full bootstrap replacement can overwrite package-managed/user edits.
         // Preserve legacy/mutable prefixes and report the pending base migration
         // instead of silently deleting or rebasing their contents.
+        boolean isArm = EnvPaths.ASSET_BOOTSTRAP_ARM.equals(bootstrapAsset);
+        String targetBootstrapSha = manifest.expectedBootstrapSha256(isArm);
         boolean bootstrapKnown = oldBootstrap != null && !"legacy".equals(oldBootstrap);
-        boolean bootstrapMatches = manifest.bootstrapSha256.equals(oldBootstrap);
+        boolean bootstrapMatches = targetBootstrapSha != null && targetBootstrapSha.equals(oldBootstrap);
         boolean bootstrapPending = !bootstrapMatches;
         String appliedBootstrap = bootstrapKnown ? oldBootstrap : "legacy";
         if (bootstrapKnown && bootstrapPending) {
             Log.w(TAG, "bootstrap changed; preserving mutable prefix until an explicit migration "
                     + "is available (installed=" + oldBootstrap + ", bundled="
-                    + manifest.bootstrapSha256 + ")");
+                    + targetBootstrapSha + ")");
         } else if (!bootstrapKnown && bootstrapPending) {
             Log.w(TAG, "legacy prefix has no base version; preserving it and refreshing only "
                     + "AGY-managed overlay/pkg layers");
@@ -223,7 +235,7 @@ public final class EnvInstaller {
         TermuxHooksRemover.remove(prefix);
         validateTree(prefix, 0);
         writeMarker(prefix, manifest, appliedBootstrap,
-                manifest.bootstrapSha256, bootstrapPending, targetPrefix);
+                targetBootstrapSha, bootstrapPending, targetPrefix);
         Log.i(TAG, "env managed layers ready: overlay=" + (overlayChanged ? "updated" : "current")
                 + " pkg=" + (pkgChanged ? "updated" : "current")
                 + " bootstrap=" + (bootstrapPending ? "pending" : "current"));

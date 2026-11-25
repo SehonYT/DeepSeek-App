@@ -45,7 +45,19 @@ def copy_tree_files(src_dir, dst_dir):
                 shutil.copy2(src_f, dst_f)
 
 
-def assemble_bundle(source_repo: str, out_archive: str):
+def normalize_arch(arch: str) -> str:
+    val = (arch or "universal").strip().lower()
+    if val in ("universal", "all", "fat"):
+        return "universal"
+    if val in ("arm64-v8a", "arm64", "aarch64", "v8a", "r8a"):
+        return "arm64-v8a"
+    if val in ("armeabi-v7a", "armeabi", "arm", "v7a", "7a"):
+        return "armeabi-v7a"
+    raise ValueError(f"Unsupported arch: {arch}")
+
+
+def assemble_bundle(source_repo: str, out_archive: str, target_arch: str = "universal"):
+    target_arch = normalize_arch(target_arch)
     work_dir = os.path.join(ARCHIVES_DIR, "bundle_staging")
     if os.path.exists(work_dir):
         shutil.rmtree(work_dir)
@@ -273,7 +285,7 @@ module.exports.default = module.exports;
         shutil.rmtree(os.path.join(emnapi_dir, "runtime"), ignore_errors=True)
         os.rename(os.path.join(emnapi_dir, "package"), os.path.join(emnapi_dir, "runtime"))
 
-    print("[*] 6. Installing complete node-pty package with android-arm64 binary...")
+    print(f"[*] 6. Installing complete node-pty package (arch={target_arch})...")
     node_pty_tmp = tempfile.mkdtemp(prefix="dsh_node_pty_")
     try:
         run(f'curl -sL https://registry.npmjs.org/node-pty/-/node-pty-1.2.0-beta.15.tgz | tar -xz -C "{node_pty_tmp}"')
@@ -285,20 +297,37 @@ module.exports.default = module.exports;
         # Prune build/src/third_party/other-arch prebuilds
         for prune_dir in ["src", "third_party"]:
             shutil.rmtree(os.path.join(src_pty_pkg, prune_dir), ignore_errors=True)
+        allowed_prebuilds = set()
+        if target_arch in ("universal", "arm64-v8a"):
+            allowed_prebuilds.add("android-arm64")
+        if target_arch in ("universal", "armeabi-v7a"):
+            allowed_prebuilds.add("android-arm")
+
         pb_dir = os.path.join(src_pty_pkg, "prebuilds")
         if os.path.isdir(pb_dir):
             for arch in os.listdir(pb_dir):
-                if arch != "android-arm64":
+                if arch not in allowed_prebuilds:
                     shutil.rmtree(os.path.join(pb_dir, arch), ignore_errors=True)
-        # Inject our android-arm64 pty.node
-        pty_source = os.path.join(PROJECT_ROOT, "vendor", "native", "android-arm64", "pty.node")
-        if os.path.isfile(pty_source):
-            android_pb = os.path.join(src_pty_pkg, "prebuilds", "android-arm64")
+
+        # Inject native pty.node binaries from vendor/native/<arch>/pty.node
+        injected_pty = []
+        for abi_dir in sorted(allowed_prebuilds):
+            pty_source = os.path.join(PROJECT_ROOT, "vendor", "native", abi_dir, "pty.node")
+            if os.path.isfile(pty_source):
+                android_pb = os.path.join(src_pty_pkg, "prebuilds", abi_dir)
+                os.makedirs(android_pb, exist_ok=True)
+                shutil.copy2(pty_source, os.path.join(android_pb, "pty.node"))
+                injected_pty.append((abi_dir, pty_source))
+                print(f"[OK] Staged node-pty prebuild: {abi_dir}/pty.node")
+
+        # Only populate build/Release/pty.node for single-binary bundles so a 64-bit binary
+        # never shadows prebuilds/android-arm/pty.node on 32-bit devices.
+        if len(injected_pty) == 1:
             build_rel = os.path.join(src_pty_pkg, "build", "Release")
-            os.makedirs(android_pb, exist_ok=True)
             os.makedirs(build_rel, exist_ok=True)
-            shutil.copy2(pty_source, os.path.join(android_pb, "pty.node"))
-            shutil.copy2(pty_source, os.path.join(build_rel, "pty.node"))
+            shutil.copy2(injected_pty[0][1], os.path.join(build_rel, "pty.node"))
+        else:
+            shutil.rmtree(os.path.join(src_pty_pkg, "build", "Release"), ignore_errors=True)
 
         # Install node-pty into work_dir/node_modules, apps/cli/node_modules, and packages/subprocess/subprocess-local/node_modules
         subprocess_local_dir = os.path.join(work_dir, "packages", "subprocess", "subprocess-local")
@@ -363,6 +392,10 @@ module.exports.default = module.exports;
 
 
 if __name__ == "__main__":
-    src_repo = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ARCHIVES_DIR, "dsh-source")
-    out_arc = sys.argv[2] if len(sys.argv) > 2 else TARGET_ARCHIVE
-    assemble_bundle(src_repo, out_arc)
+    import argparse
+    parser = argparse.ArgumentParser(description="Assemble compact DeepSeek Harness runtime bundle.")
+    parser.add_argument("source_repo", nargs="?", default=os.path.join(ARCHIVES_DIR, "dsh-source"))
+    parser.add_argument("out_archive", nargs="?", default=TARGET_ARCHIVE)
+    parser.add_argument("--arch", default=os.environ.get("TARGET_ARCH", "universal"))
+    cli_args = parser.parse_args()
+    assemble_bundle(cli_args.source_repo, cli_args.out_archive, cli_args.arch)

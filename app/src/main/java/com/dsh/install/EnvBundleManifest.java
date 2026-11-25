@@ -54,18 +54,21 @@ public final class EnvBundleManifest {
                 throw new IllegalStateException("unsupported env manifest schema: " + schema);
             }
             String bundleId = requireSha256(json.getString("bundleId"), "bundleId");
-            String bootstrapSha = requireSha256(json.getString("bootstrapSha256"), "bootstrapSha256");
-            String bootstrapArmSha = json.optString("bootstrapArmSha256", null);
-            if (bootstrapArmSha != null && bootstrapArmSha.isEmpty()) {
-                bootstrapArmSha = null;
+            String bootstrapSha = optSha256(json, "bootstrapSha256");
+            String bootstrapArmSha = optSha256(json, "bootstrapArmSha256");
+            if (bootstrapSha == null && bootstrapArmSha == null) {
+                throw new IllegalStateException("env manifest contains neither bootstrapSha256 nor bootstrapArmSha256");
             }
             String overlaySha = requireSha256(json.getString("overlaySha256"), "overlaySha256");
             String pkgSha = requireSha256(json.getString("pkgSha256"), "pkgSha256");
-            int symlinks = json.getInt("bootstrapSymlinkCount");
-            if (symlinks < 1) {
-                throw new IllegalStateException("env manifest contains no bootstrap symlinks");
+            int symlinks = json.optInt("bootstrapSymlinkCount", 0);
+            if (bootstrapSha != null && symlinks < 1) {
+                throw new IllegalStateException("env manifest contains no arm64 bootstrap symlinks");
             }
             int armSymlinks = json.optInt("bootstrapArmSymlinkCount", 0);
+            if (bootstrapArmSha != null && armSymlinks < 1) {
+                throw new IllegalStateException("env manifest contains no arm32 bootstrap symlinks");
+            }
             JSONArray packagesJson = json.getJSONArray("seedPackages");
             List<String> packages = new ArrayList<>();
             for (int i = 0; i < packagesJson.length(); i++) {
@@ -86,18 +89,42 @@ public final class EnvBundleManifest {
         }
     }
 
+    public String expectedBootstrapSha256(boolean isArm) {
+        if (isArm && bootstrapArmSha256 != null) {
+            return bootstrapArmSha256;
+        }
+        return bootstrapSha256 != null ? bootstrapSha256 : bootstrapArmSha256;
+    }
+
+    public int expectedSymlinkCount(boolean isArm) {
+        if (isArm && bootstrapArmSymlinkCount > 0) {
+            return bootstrapArmSymlinkCount;
+        }
+        return bootstrapSymlinkCount > 0 ? bootstrapSymlinkCount : bootstrapArmSymlinkCount;
+    }
+
     public void verifyBootstrap(File archive) throws IOException {
         try {
             String actual = Sha256.of(archive);
-            if (!bootstrapSha256.equals(actual)) {
+            boolean matchesArm64 = bootstrapSha256 != null && bootstrapSha256.equals(actual);
+            boolean matchesArm32 = bootstrapArmSha256 != null && bootstrapArmSha256.equals(actual);
+            if (!matchesArm64 && !matchesArm32) {
                 throw new IOException("bootstrap sha256 mismatch: got " + actual
-                        + " want " + bootstrapSha256);
+                        + " want " + expectedBootstrapSha256(false));
             }
         } catch (IOException e) {
             throw e;
         } catch (Exception e) {
             throw new IOException("cannot hash bootstrap archive", e);
         }
+    }
+
+    private static String optSha256(JSONObject json, String name) {
+        String value = json.optString(name, null);
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        return requireSha256(value, name);
     }
 
     private static String requireSha256(String value, String name) {

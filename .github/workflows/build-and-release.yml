@@ -110,18 +110,26 @@ jobs:
           fi
           cat config/app.env
 
-      - name: Build DeepSeek Release APK (dist/deepseek.apk)
+      - name: Build DeepSeek Universal Release APK (dist/deepseek.apk)
         run: |
-          bash build.sh
+          bash build.sh --arch universal
+
+      - name: Build DeepSeek ARM64 Split APK (dist/deepseek-arm64-v8a.apk)
+        run: |
+          bash build.sh --arch arm64-v8a
+
+      - name: Build DeepSeek ARMv7 Split APK (dist/deepseek-armeabi-v7a.apk)
+        run: |
+          bash build.sh --arch armeabi-v7a
 
       - name: Build DeepSeek Dev APK (dist/deepseek-dev.apk)
         run: |
-          bash build.sh --dev
+          bash build.sh --dev --arch universal
 
       - name: Compute Cryptographic Checksums
         run: |
           cd dist
-          sha256sum deepseek.apk deepseek-dev.apk > SHA256SUMS.txt
+          sha256sum deepseek.apk deepseek-arm64-v8a.apk deepseek-armeabi-v7a.apk deepseek-dev.apk > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Upload Build Artifacts
@@ -130,6 +138,8 @@ jobs:
           name: deepseek-binaries
           path: |
             dist/deepseek.apk
+            dist/deepseek-arm64-v8a.apk
+            dist/deepseek-armeabi-v7a.apk
             dist/deepseek-dev.apk
             dist/SHA256SUMS.txt
 
@@ -144,8 +154,10 @@ jobs:
           make_latest: true
           files: |
             dist/deepseek.apk
+            dist/deepseek-arm64-v8a.apk
+            dist/deepseek-armeabi-v7a.apk
             dist/deepseek-dev.apk
             dist/SHA256SUMS.txt
           body: |
             ### DeepSeek Mobile for Android
-            Autonomous AI Coding Environment &bull; Native Termux Bionic Userspace &bull; ARM64
+            Autonomous AI Coding Environment &bull; Native Termux Bionic Userspace &bull; Universal (`arm64-v8a` + `armeabi-v7a`) &amp; ABI Splits

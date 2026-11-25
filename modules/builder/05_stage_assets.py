@@ -27,16 +27,27 @@ def stage_assets(staging_dir):
     if not ok:
         raise RuntimeError("Failed to prepare and stage runtime assets!")
 
+    target_arch = os.environ.get("TARGET_ARCH", "universal")
     env_src = os.path.join(PROJECT_ROOT, "env", "dist", "env")
-    print(f"[*] Staging env assets from {env_src} -> {env_dst}...")
+    print(f"[*] Staging env assets (arch={target_arch}) from {env_src} -> {env_dst}...")
     manifest_file = os.path.join(env_src, "manifest.json")
-    if not os.path.isfile(manifest_file):
-        print(f"[*] env manifest missing, building env assets...")
-        subprocess.check_call(["bash", os.path.join(PROJECT_ROOT, "env", "build.sh"), "assets"])
+    arch_file = os.path.join(env_src, ".target_arch")
+    staged_arch = ""
+    if os.path.isfile(arch_file):
+        with open(arch_file, "r", encoding="utf-8") as f:
+            staged_arch = f.read().strip()
+    if not os.path.isfile(manifest_file) or staged_arch != target_arch:
+        print(f"[*] Rebuilding env assets for TARGET_ARCH={target_arch}...")
+        env_cmd_env = os.environ.copy()
+        env_cmd_env["TARGET_ARCH"] = target_arch
+        subprocess.check_call(
+            ["bash", os.path.join(PROJECT_ROOT, "env", "build.sh"), "assets"],
+            env=env_cmd_env,
+        )
     if os.path.exists(env_dst):
         shutil.rmtree(env_dst)
     shutil.copytree(env_src, env_dst)
-    print(f"[OK] Staged env assets.")
+    print(f"[OK] Staged env assets ({target_arch}).")
 
     web_src = os.path.join(PROJECT_ROOT, "web")
     web_dst = os.path.join(assets_dir, "web")

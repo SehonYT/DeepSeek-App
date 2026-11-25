@@ -106,6 +106,30 @@ export GODEBUG="netdns=go,asyncpreemptoff=1"
 if [ -f /proc/cpuinfo ] && (! grep -qi "aes" /proc/cpuinfo || ! grep -qi "atomics" /proc/cpuinfo); then
     export GODEBUG="$GODEBUG,cpu.all=off,arm64.aes=off,arm64.pmull=off,arm64.sha1=off,arm64.sha2=off,arm64.sha3=off,arm64.sha512=off,arm64.crc32=off,arm64.atomics=off,arm64.cpuid=off"
 fi
+
+# Tune Node V8 heap and libuv threadpool for the current device RAM & ABI
+_HOST_ARCH="$(uname -m 2>/dev/null || echo aarch64)"
+_MEM_MB="$(awk '/^MemTotal:/ {printf "%d", $2 / 1024}' /proc/meminfo 2>/dev/null || echo 4096)"
+if [[ "$_HOST_ARCH" != "aarch64" && "$_HOST_ARCH" != "arm64" ]] || [ "$_MEM_MB" -lt 2500 ]; then
+    _MAX_OLD_SPACE=512
+    _UV_THREADS=2
+elif [ "$_MEM_MB" -lt 3500 ]; then
+    _MAX_OLD_SPACE=768
+    _UV_THREADS=2
+elif [ "$_MEM_MB" -lt 5500 ]; then
+    _MAX_OLD_SPACE=1024
+    _UV_THREADS=4
+elif [ "$_MEM_MB" -lt 7500 ]; then
+    _MAX_OLD_SPACE=1536
+    _UV_THREADS=4
+else
+    _MAX_OLD_SPACE=2048
+    _UV_THREADS=6
+fi
+if [[ "${NODE_OPTIONS:-}" != *"--max-old-space-size"* ]]; then
+    export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=${_MAX_OLD_SPACE}"
+fi
+export UV_THREADPOOL_SIZE="${UV_THREADPOOL_SIZE:-$_UV_THREADS}"
 export ANTIGRAVITY_VSCODE_HOST="1"
 export BROWSER="$RT/bin/xdg-open"
 

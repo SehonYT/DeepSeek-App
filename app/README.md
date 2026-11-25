@@ -75,6 +75,8 @@ graph TD
   - Запускается как `ForegroundService` с типом `dataSync` и кликабельной иконкой в трее (`ForegroundNotification` с `PendingIntent` на `MainActivity`).
   - Удерживает CPU WakeLock (`WakeLockHolder`) с флагом `PARTIAL_WAKE_LOCK` и проверкой `isHeld()`, гарантируя непрерывную работу агента при выключенном экране.
   - Управляет жизненным циклом супервизора ядра и HTTP Gateway; фоновый демон `dsh-daemon` (fallback `agy-daemon`) запускается через `$PREFIX/bin/python3` только после готовности ядра (`onCoreReady`) и пропускается, если `python3` не установлен.
+- **`CoreEnvironment` & `DeviceProfile`**:
+  - Определяет профиль устройства (ABI 32/64-бит, наличие ARMv8 crypto/atomics/LSE, семейство SoC, legacy ARMv8.0-ядра вроде Cortex-A53/A57, объем RAM) и выставляет `GODEBUG`, `NODE_OPTIONS` (`--max-old-space-size`), `UV_THREADPOOL_SIZE`, `DSH_DEVICE_TIER` и политику фоновых sidecar-задач.
 - **`CoreLauncher`**:
   - Управляет установкой фазы 1 (`CoreInstaller`: ключ кэша по `manifestHash` и проверка `bin.js`, без лишней перераспаковки при обновлении APK; `TermuxPrefixRewriter` с маркером `length:mtime` для `bash`; `ShellBridgeInstaller` v4 с TLS-переменными) и запуском нативного процесса.
   - Содержит `killOrphanCoreProcesses()`: сканирует `/proc` и принудительно завершает (`SIGKILL`) зависшие orphan-процессы (`runtime/dsh` / `apps/cli/lib/bin.js` с `--profile`) от предыдущих сессий перед стартом.

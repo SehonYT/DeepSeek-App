@@ -53,25 +53,30 @@ def read_seed_packages(root: Path) -> list[str]:
 
 def make_manifest(root: Path) -> dict:
     bootstrap = root / "bootstrap" / "bootstrap.tar.gz"
+    bootstrap_arm = root / "bootstrap" / "bootstrap-arm.tar.gz"
     overlay = root / "overlay"
     pkg = root / "pkg"
-    for required in (bootstrap, overlay, pkg):
+    for required in (overlay, pkg):
         if not required.exists():
             raise FileNotFoundError(f"required env bundle input is missing: {required}")
-
-    with tarfile.open(bootstrap, "r:gz") as archive:
-        symlink_count = sum(member.issym() for member in archive)
+    if not bootstrap.is_file() and not bootstrap_arm.is_file():
+        raise FileNotFoundError(
+            f"required env bootstrap archive is missing: expected {bootstrap} or {bootstrap_arm}"
+        )
 
     identity = {
         "schema": SCHEMA,
-        "bootstrapSha256": sha256_file(bootstrap),
-        "bootstrapSymlinkCount": symlink_count,
         "overlaySha256": tree_digest(overlay),
         "pkgSha256": tree_digest(pkg),
         "seedPackages": read_seed_packages(root),
     }
 
-    bootstrap_arm = root / "bootstrap" / "bootstrap-arm.tar.gz"
+    if bootstrap.is_file():
+        with tarfile.open(bootstrap, "r:gz") as archive:
+            symlink_count = sum(member.issym() for member in archive)
+        identity["bootstrapSha256"] = sha256_file(bootstrap)
+        identity["bootstrapSymlinkCount"] = symlink_count
+
     if bootstrap_arm.is_file():
         with tarfile.open(bootstrap_arm, "r:gz") as archive:
             arm_symlinks = sum(member.issym() for member in archive)
