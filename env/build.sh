@@ -26,7 +26,7 @@ log() { printf 'build: %s\n' "$*" >&2; }
 ABI_TABLE="
 aarch64 bootstrap-aarch64.zip bootstrap.tar.gz        aarch64-packages
 arm     bootstrap-arm.zip     bootstrap-arm.tar.gz    arm-packages
-i686    bootstrap-i686.zip    bootstrap-x86.tar.gz    x86-packages
+i686    bootstrap-i686.zip    bootstrap-x86.tar.gz    i686-packages
 x86_64  bootstrap-x86_64.zip  bootstrap-x86_64.tar.gz x86_64-packages
 "
 
