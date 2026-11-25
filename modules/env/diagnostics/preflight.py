@@ -20,6 +20,8 @@ def run_preflight(app_root: Optional[str] = None, min_mb_free: int = 250) -> Dic
 
     arch = platform.machine().lower()
     is_aarch64 = arch in ("aarch64", "arm64")
+    is_arm32 = arch in ("armv7l", "armv7", "arm", "armv8l")
+    arch_supported = is_aarch64 or is_arm32
     
     # Check free disk space
     free_mb = 0
@@ -33,12 +35,14 @@ def run_preflight(app_root: Optional[str] = None, min_mb_free: int = 250) -> Dic
     space_ok = free_mb >= min_mb_free
     write_ok = os.access(app_root, os.W_OK) if os.path.exists(app_root) else False
 
-    ok = is_aarch64 and space_ok and write_ok
+    ok = arch_supported and space_ok and write_ok
 
     return {
         "ok": ok,
         "arch": arch,
         "is_aarch64": is_aarch64,
+        "is_arm32": is_arm32,
+        "arch_supported": arch_supported,
         "free_disk_mb": free_mb,
         "space_ok": space_ok,
         "write_ok": write_ok,

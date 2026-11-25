@@ -77,6 +77,15 @@ public class MainActivity extends Activity
     private long splashDeadline;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable splashWatchdog = new Runnable() {
+        @Override
+        public void run() {
+            if (appLoaded && !splash.isFatalShown()) {
+                Log.w(TAG, "watchdog: auto-dismissing splash after timeout");
+                dismissSplash();
+            }
+        }
+    };
 
     /**
      * Runs for the whole activity life: it drives the splash, loads the app on
@@ -113,15 +122,8 @@ public class MainActivity extends Activity
                     splash.showLoading();
                 }
                 webViewHost.loadApp();
-                handler.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (appLoaded && !splash.isFatalShown()) {
-                            Log.w(TAG, "watchdog: auto-dismissing splash after timeout");
-                            dismissSplash();
-                        }
-                    }
-                }, 10000);
+                handler.removeCallbacks(splashWatchdog);
+                handler.postDelayed(splashWatchdog, 10000);
             }
             return;
         }
@@ -134,20 +136,31 @@ public class MainActivity extends Activity
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (CoreRuntimeState.serverUrl == null) {
+            com.dsh.core.BootMetrics.resetSession();
+        }
         activeActivity = this;
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        getWindow().setFlags(
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED);
+        com.dsh.ui.download.FileDownloader.pruneStalePendingBlobsAsync(this);
 
         themeManager = new ThemeManager(this);
         themeManager.applyToActivity(this);
 
+        // Start CoreServerService BEFORE WebViewHost init so node fork runs in parallel with Chromium startup.
+        startCoreService();
 
         oauthManager = new OAuthManager();
         runtimeManager = new RuntimeManager(this);
         shizukuBridge = new ShizukuBridge(this);
         androidBridge = new AndroidBridge(this, runtimeManager, shizukuBridge, themeManager);
         androidBridge.setActivity(this);
+        com.dsh.core.BootMetrics.markWebviewInitStart();
         webViewHost = new WebViewHost(this, themeManager, oauthManager, androidBridge, this);
+        com.dsh.core.BootMetrics.markWebviewInitDone();
         webViewHost.setListener(this);
 
         rootLayout = new FrameLayout(this);
@@ -165,8 +178,6 @@ public class MainActivity extends Activity
 
         splashDeadline = System.currentTimeMillis() + SPLASH_TIMEOUT_MS;
         requestAppPermissions();
-
-        startCoreService();
     }
 
     private void startCoreService() {
@@ -191,6 +202,7 @@ public class MainActivity extends Activity
         splashDeadline = System.currentTimeMillis() + SPLASH_TIMEOUT_MS;
         splash.showLoading();
         CoreServiceLauncher.stop(this);
+        com.dsh.install.BootStateStamp.invalidate(this);
         try {
             java.io.File marker = new java.io.File(runtimeManager.getRuntimeDir(), com.dsh.runtime.RuntimePaths.RUNTIME_MARKER);
             if (marker.exists()) {
@@ -220,6 +232,7 @@ public class MainActivity extends Activity
             public void run() {
                 if (webViewHost != null && webViewHost.getWebView() != null) {
                     appLoaded = true;
+                    loadedGeneration = CoreRuntimeState.readyGeneration;
                     splash.clearFatal();
                     webViewHost.getWebView().loadUrl(url);
                 }
@@ -227,10 +240,39 @@ public class MainActivity extends Activity
         });
     }
 
-    /** Idempotent; called by AndroidBridge.onUiReady() on the main thread. */
+    /** Idempotent; called when WebView finishes loading the core UI or on watchdog timeout. */
     public void dismissSplash() {
-        Log.i(TAG, "dismissSplash: fading out splashView (280ms)");
+        handler.removeCallbacks(splashWatchdog);
+        Log.i(TAG, "dismissSplash: fading out splashView");
         splash.dismiss();
+        com.dsh.core.BootMetrics.markUiPaint();
+    }
+
+    public WebView getWebView() {
+        return webViewHost != null ? webViewHost.getWebView() : null;
+    }
+
+    /** Notifies the WebView when connectivity transitions from offline back to online. */
+    public void notifyNetworkOnline() {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                WebView wv = getWebView();
+                if (wv == null) {
+                    return;
+                }
+                try {
+                    wv.evaluateJavascript(
+                            "(function(){try{"
+                                    + "window.dispatchEvent(new Event('online'));"
+                                    + "window.dispatchEvent(new CustomEvent('agy:network-online'));"
+                                    + "window.dispatchEvent(new CustomEvent('dsh:network-online'));"
+                                    + "}catch(e){}})();",
+                            null);
+                } catch (Throwable ignored) {
+                }
+            }
+        });
     }
 
     public boolean isDesktopMode() {
@@ -251,6 +293,11 @@ public class MainActivity extends Activity
         if (activeActivity == this) {
             activeActivity = null;
         }
+        handler.removeCallbacks(splashWatchdog);
+        if (splash != null) {
+            splash.destroy();
+        }
+        com.dsh.ui.download.FileDownloader.clearPendingTask();
         AppLifecycle.destroy(handler);
         if (androidBridge != null) {
             androidBridge.setActivity(null);
@@ -361,6 +408,11 @@ public class MainActivity extends Activity
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
                 if (!android.os.Environment.isExternalStorageManager()) {
+                    android.content.SharedPreferences prefs = getSharedPreferences("dsh_prefs", MODE_PRIVATE);
+                    if (prefs.getBoolean("storage_prompted", false)) {
+                        return;
+                    }
+                    prefs.edit().putBoolean("storage_prompted", true).apply();
                     Intent intent = new Intent(
                             android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
                     intent.setData(Uri.parse("package:" + getPackageName()));

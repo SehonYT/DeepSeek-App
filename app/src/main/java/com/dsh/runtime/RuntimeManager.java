@@ -108,7 +108,8 @@ public final class RuntimeManager {
         File prefix = new File(filesDir, com.dsh.install.EnvPaths.PREFIX_DIR);
         File nodeBin = new File(prefix, "bin/node");
         File bashBin = new File(prefix, com.dsh.install.EnvPaths.BASH_REL);
-        File dshScript = new File(getRuntimeDir(), "dsh/apps/cli/lib/bin.js");
+        File dshBoot = new File(getRuntimeDir(), "dsh/apps/cli/lib/dsh_boot.mjs");
+        File dshScript = dshBoot.isFile() ? dshBoot : new File(getRuntimeDir(), "dsh/apps/cli/lib/bin.js");
         if (!dshScript.isFile()) {
             File altScript1 = new File(filesDir, "runtime/apps/cli/lib/bin.js");
             File altScript2 = new File(filesDir, "dsh/apps/cli/lib/bin.js");

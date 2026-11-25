@@ -8,7 +8,9 @@ updates SYMLINKS.txt, applies symlinks and packs a clean bootstrap.tar.gz.
 import argparse
 import io
 import os
+import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -150,7 +152,91 @@ def extract_deb_into_bootstrap(deb_path, dest, trim, new_sl_lines):
     print(f"[pack_bootstrap] Ingested {pkg_name} {version}: {added_files} files, {added_links} symlinks (pruned {pruned_files} doc files)")
 
 
-def pack_bootstrap(zip_path, out_tar_gz, trim=True, extra_debs=None):
+TERMUX_PREFIX_RE = re.compile(r"/data/(?:data|user/[0-9]+)/[^/]+/files/usr(?=/|$)")
+TERMUX_SHEBANG_RE = re.compile(r"^#!(?:/data/(?:data|user/[0-9]+)/[^/]+/files/usr)(.*)$", re.MULTILINE)
+ENV_SHEBANG_RE = re.compile(r"^#![ \t]*/usr/bin/env[ \t]+([^ \t\r\n]+)([^\n]*)$", re.MULTILINE)
+SCRIPT_DIRS = ("bin", "libexec", "etc", "share", "var")
+ELF_DIRS = ("bin", "lib", "libexec")
+
+
+def is_elf_bytes(data: bytes) -> bool:
+    return len(data) >= 4 and data[:4] == b"\x7fELF"
+
+
+def is_text_bytes(data: bytes) -> bool:
+    if not data or is_elf_bytes(data):
+        return False
+    return b"\x00" not in data[:4096]
+
+
+def prepatch_tree_for_package(dest: str, pkg_name: str) -> None:
+    """Pre-patch ELF DT_RUNPATH strings, symlinks, and script shebangs for fixed package ID."""
+    if not pkg_name or len(pkg_name) > 10:
+        raise ValueError(f"Package name must be 1..10 chars for length-preserving ELF patch: {pkg_name}")
+    target_prefix = f"/data/user/0/{pkg_name}/files/usr"
+    padded_pkg = pkg_name.ljust(10, "/")
+
+    t_data = b"/data/data/com.termux"
+    r_data = f"/data/data/{padded_pkg}".encode("ascii")
+    t_user = b"/data/user/0/com.termux"
+    r_user = f"/data/user/0/{padded_pkg}".encode("ascii")
+
+    elf_patched = 0
+    for d in ELF_DIRS:
+        base = os.path.join(dest, d)
+        if not os.path.isdir(base):
+            continue
+        for root, _, files in os.walk(base):
+            for fn in files:
+                fp = os.path.join(root, fn)
+                if os.path.islink(fp):
+                    continue
+                with open(fp, "rb") as f:
+                    head = f.read(4)
+                if not is_elf_bytes(head):
+                    continue
+                with open(fp, "rb") as f:
+                    raw = f.read()
+                updated = raw.replace(t_data, r_data).replace(t_user, r_user)
+                if updated != raw:
+                    st = os.stat(fp)
+                    with open(fp, "wb") as f:
+                        f.write(updated)
+                    os.chmod(fp, st.st_mode)
+                    elf_patched += 1
+
+    text_patched = 0
+    for d in SCRIPT_DIRS:
+        base = os.path.join(dest, d)
+        if not os.path.isdir(base):
+            continue
+        for root, _, files in os.walk(base):
+            for fn in files:
+                fp = os.path.join(root, fn)
+                if os.path.islink(fp):
+                    continue
+                with open(fp, "rb") as f:
+                    raw = f.read()
+                if not is_text_bytes(raw):
+                    continue
+                text = raw.decode("latin1")
+                if "/data/" not in text and "/usr/bin/env" not in text:
+                    continue
+                new_text = ENV_SHEBANG_RE.sub(lambda m: f"#!{target_prefix}/bin/env {m.group(1)}{m.group(2)}", text)
+                new_text = TERMUX_PREFIX_RE.sub(target_prefix, new_text)
+                if new_text != text:
+                    st = os.stat(fp)
+                    with open(fp, "wb") as f:
+                        f.write(new_text.encode("latin1"))
+                    os.chmod(fp, st.st_mode)
+                    text_patched += 1
+
+    with open(os.path.join(dest, ".dsh-prepatched"), "w", encoding="utf-8") as f:
+        f.write(pkg_name + "\n")
+    print(f"[pack_bootstrap] Pre-patched for {pkg_name}: {elf_patched} ELFs, {text_patched} scripts")
+
+
+def pack_bootstrap(zip_path, out_tar_gz, trim=True, extra_debs=None, prepatch_pkg=None):
     if not os.path.isfile(zip_path):
         raise FileNotFoundError(f"Input zip not found: {zip_path}")
 
@@ -246,18 +332,39 @@ def pack_bootstrap(zip_path, out_tar_gz, trim=True, extra_debs=None):
         with open(sl_out_path, "w", encoding="utf-8") as f:
             f.write("\n".join(new_sl_lines) + "\n")
 
+        if prepatch_pkg:
+            prepatch_tree_for_package(dest, prepatch_pkg)
+
         print(f"[pack_bootstrap] Extracted: {total_files - pruned_files} base files "
               f"(pruned {pruned_files} doc/man files, ~{pruned_bytes / (1024 * 1024):.2f} MB)")
         print(f"[pack_bootstrap] Symlinks: {len(new_sl_lines)} total preserved")
 
-        # Create tar.gz archive
+        # Create tar.zst or tar.gz archive
         os.makedirs(os.path.dirname(os.path.abspath(out_tar_gz)), exist_ok=True)
         tmp_tar = out_tar_gz + ".tmp"
         if os.path.exists(tmp_tar):
             os.unlink(tmp_tar)
 
-        with tarfile.open(tmp_tar, "w:gz", compresslevel=9) as tar:
-            tar.add(dest, arcname=".")
+        if out_tar_gz.endswith((".tar.zst", ".tzst")):
+            zstd_bin = shutil.which("zstd")
+            if not zstd_bin:
+                raise RuntimeError("zstd binary required to write .tar.zst archive")
+            proc = subprocess.Popen(
+                [zstd_bin, "-19", "-T0", "-q", "-f", "-o", tmp_tar],
+                stdin=subprocess.PIPE,
+            )
+            try:
+                with tarfile.open(fileobj=proc.stdin, mode="w|") as tar:
+                    tar.add(dest, arcname=".")
+            finally:
+                if proc.stdin:
+                    proc.stdin.close()
+                rc = proc.wait()
+                if rc != 0:
+                    raise RuntimeError(f"zstd compression failed with exit code {rc}")
+        else:
+            with tarfile.open(tmp_tar, "w:gz", compresslevel=9) as tar:
+                tar.add(dest, arcname=".")
 
         os.replace(tmp_tar, out_tar_gz)
         out_size_mb = os.path.getsize(out_tar_gz) / (1024 * 1024)
@@ -273,9 +380,10 @@ def main():
     parser.add_argument("--out", required=True, help="Path to output bootstrap.tar.gz")
     parser.add_argument("--no-trim", action="store_true", help="Do not prune doc/man files")
     parser.add_argument("--extra-deb", action="append", default=[], help="Extra deb packages to bundle into bootstrap")
+    parser.add_argument("--prepatch-pkg", default=None, help="Pre-patch ELF/scripts for fixed package ID (e.g. com.dsh)")
     args = parser.parse_args()
 
-    pack_bootstrap(args.zip, args.out, trim=not args.no_trim, extra_debs=args.extra_deb)
+    pack_bootstrap(args.zip, args.out, trim=not args.no_trim, extra_debs=args.extra_deb, prepatch_pkg=args.prepatch_pkg)
 
 
 if __name__ == "__main__":

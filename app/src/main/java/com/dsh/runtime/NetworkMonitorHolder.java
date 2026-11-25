@@ -3,6 +3,7 @@ package com.dsh.runtime;
 import android.content.Context;
 
 import com.dsh.net.NetworkMonitor;
+import com.dsh.ui.MainActivity;
 
 /** Owns the single network monitor for the process. */
 public final class NetworkMonitorHolder {
@@ -14,15 +15,26 @@ public final class NetworkMonitorHolder {
         this.appContext = context.getApplicationContext();
     }
 
-    /** Registers the default-network callback once; refreshes DNS on changes. */
+    /** Registers the default-network callback once; refreshes DNS on changes and notifies UI on recovery. */
     public synchronized void start() {
         if (monitor == null) {
-            monitor = new NetworkMonitor(appContext, new NetworkMonitor.Listener() {
-                @Override
-                public void onNetworkChanged() {
-                    NetworkConfigWriter.write(appContext);
-                }
-            });
+            monitor = new NetworkMonitor(
+                    appContext,
+                    new NetworkMonitor.Listener() {
+                        @Override
+                        public void onNetworkChanged() {
+                            NetworkConfigWriter.write(appContext);
+                        }
+                    },
+                    new NetworkMonitor.RecoveryListener() {
+                        @Override
+                        public void onNetworkRecovered() {
+                            MainActivity act = MainActivity.activeActivity;
+                            if (act != null) {
+                                act.notifyNetworkOnline();
+                            }
+                        }
+                    });
         }
         monitor.register();
     }

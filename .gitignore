@@ -12,11 +12,16 @@ tools/r8.jar
 tools/debug.keystore
 vendor/*
 !vendor/native/
+env/packages/arm/
+env/packages/aarch64/
 
 # Archives and binaries
 *.tar
 *.tar.gz
+*.tar.zst
+*.tzst
 *.tar.xz
+app/src/main/jniLibs/
 *.bin
 *.idsig
 

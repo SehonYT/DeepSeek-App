@@ -44,6 +44,18 @@ public final class TermuxPrefixRewriter {
         if (bashFile == null || !bashFile.isFile()) {
             return;
         }
+        File prefixDir = bashFile.getParentFile() != null ? bashFile.getParentFile().getParentFile() : null;
+        File marker = prefixDir != null ? new File(prefixDir, ".dsh-bash-patched") : null;
+        String sig = bashFile.length() + ":" + bashFile.lastModified();
+        if (marker != null && marker.isFile()) {
+            try {
+                String existing = IoUtil.readAll(new FileInputStream(marker), "UTF-8").trim();
+                if (sig.equals(existing)) {
+                    return;
+                }
+            } catch (Exception ignored) {
+            }
+        }
         try {
             byte[] full;
             try (InputStream in = new FileInputStream(bashFile)) {
@@ -74,6 +86,10 @@ public final class TermuxPrefixRewriter {
                 AtomicFileWriter.writeBytes(bashFile, full);
                 bashFile.setExecutable(true, false);
                 Log.i(TAG, "successfully patched hardcoded profile paths in bash binary: " + bashFile);
+            }
+            if (marker != null) {
+                String newSig = bashFile.length() + ":" + bashFile.lastModified();
+                AtomicFileWriter.writeText(marker, newSig + "\n");
             }
         } catch (Throwable t) {
             Log.w(TAG, "cannot patch bash binary " + bashFile + ": " + t.getMessage());

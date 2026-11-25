@@ -1,13 +1,13 @@
 package com.dsh.util;
 
-/** Builds the core's loopback https URLs. */
+/** Builds the core's loopback http URLs. */
 public final class CoreUrl {
 
     private CoreUrl() {
     }
 
     public static String startUrl(int port) {
-        return "https://127.0.0.1:" + port + "/";
+        return "http://127.0.0.1:" + port + "/";
     }
 
     public static String startUrl(int port, String csrfToken) {
@@ -16,6 +16,6 @@ public final class CoreUrl {
     }
 
     public static String baseUrl(int port) {
-        return "https://127.0.0.1:" + port;
+        return "http://127.0.0.1:" + port;
     }
 }

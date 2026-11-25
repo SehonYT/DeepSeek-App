@@ -55,17 +55,41 @@ def find_dsh_source():
     return None
 
 
-def find_prebuilt_archive():
-    candidates = []
-    for search_dir in [
+def has_zstd_jni(target_arch: str) -> bool:
+    jni_dir = os.path.join(PROJECT_ROOT, "app", "src", "main", "jniLibs")
+    arch = (target_arch or "universal").strip().lower()
+    if arch == "arm64-v8a":
+        return os.path.isfile(os.path.join(jni_dir, "arm64-v8a", "libdsh_zstd.so"))
+    if arch == "armeabi-v7a":
+        return os.path.isfile(os.path.join(jni_dir, "armeabi-v7a", "libdsh_zstd.so"))
+    return (
+        os.path.isfile(os.path.join(jni_dir, "arm64-v8a", "libdsh_zstd.so"))
+        and os.path.isfile(os.path.join(jni_dir, "armeabi-v7a", "libdsh_zstd.so"))
+    )
+
+
+def find_prebuilt_archive(target_arch: str = None):
+    target_arch = (target_arch or os.environ.get("TARGET_ARCH") or "universal").strip().lower()
+    prefer_zst = has_zstd_jni(target_arch)
+    search_dirs = [
         os.path.join(PROJECT_ROOT, "archives"),
         os.path.join(PROJECT_ROOT, "vendor"),
         os.path.expanduser("~/workspace/archives"),
         os.path.expanduser("~/deepseek-harness"),
-    ]:
-        if os.path.isdir(search_dir):
-            candidates.extend(glob.glob(os.path.join(search_dir, "*dsh*prebuilt*.tar.gz")))
-            candidates.extend(glob.glob(os.path.join(search_dir, "dsh*.tar.gz")))
+    ]
+    exts = (".tar.zst", ".tar.gz") if prefer_zst else (".tar.gz",)
+    for ext in exts:
+        for search_dir in search_dirs:
+            if os.path.isdir(search_dir):
+                arch_matches = sorted(glob.glob(os.path.join(search_dir, f"*dsh*prebuilt*{target_arch}*{ext}")))
+                if arch_matches:
+                    return arch_matches[0]
+    candidates = []
+    for ext in exts:
+        for search_dir in search_dirs:
+            if os.path.isdir(search_dir):
+                candidates.extend(sorted(glob.glob(os.path.join(search_dir, f"*dsh*prebuilt*{ext}"))))
+                candidates.extend(sorted(glob.glob(os.path.join(search_dir, f"dsh*{ext}"))))
     if candidates:
         return candidates[0]
     return None
@@ -109,13 +133,19 @@ def prepare(dest_runtime_dir: str) -> bool:
 
     dest_runtime_dir = os.path.abspath(dest_runtime_dir)
     os.makedirs(dest_runtime_dir, exist_ok=True)
-    dsh_tar = os.path.join(dest_runtime_dir, "dsh.tar.gz")
-
     archive = find_prebuilt_archive()
+    is_zst = bool(archive and archive.endswith((".tar.zst", ".tzst")))
+    dsh_name = "dsh.tar.zst" if is_zst else "dsh.tar.gz"
+    dsh_tar = os.path.join(dest_runtime_dir, dsh_name)
+    for stale in ("dsh.tar.gz", "dsh.tar.zst"):
+        stale_path = os.path.join(dest_runtime_dir, stale)
+        if stale != dsh_name and os.path.exists(stale_path):
+            os.remove(stale_path)
+
     if archive and os.path.isfile(archive):
         print(f"[*] Copying assembled prebuilt archive {archive} -> {dsh_tar}...")
         shutil.copy2(archive, dsh_tar)
-        print(f"[OK] Staged dsh.tar.gz ({os.path.getsize(dsh_tar) / (1024*1024):.2f} MB)")
+        print(f"[OK] Staged {dsh_name} ({os.path.getsize(dsh_tar) / (1024*1024):.2f} MB)")
     else:
         dsh_source = find_dsh_source()
         if dsh_source and os.path.isdir(dsh_source):
@@ -140,7 +170,7 @@ def prepare(dest_runtime_dir: str) -> bool:
 
     manifest_path = os.path.join(dest_runtime_dir, "manifest.json")
     with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump({"files": {"dsh.tar.gz": sha256_file(dsh_tar)}}, f, indent=2)
+        json.dump({"files": {dsh_name: sha256_file(dsh_tar)}}, f, indent=2)
 
     print(f"[OK] Generated runtime manifest -> {manifest_path}")
     return True

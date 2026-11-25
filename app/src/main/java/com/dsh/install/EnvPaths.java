@@ -19,6 +19,7 @@ public final class EnvPaths {
 
     /** aarch64 (arm64-v8a) bootstrap: the default 64-bit ARM userspace. */
     public static final String ASSET_BOOTSTRAP = "env/bootstrap/bootstrap.tar.gz";
+    public static final String ASSET_BOOTSTRAP_ZST = "env/bootstrap/bootstrap.tar.zst";
     public static final String ASSET_BOOTSTRAP_PLAIN = "env/bootstrap/bootstrap.tar";
     /** armeabi-v7a bootstrap, for 32-bit ARM userspaces (incl. armv8l kernels). */
     public static final String ASSET_BOOTSTRAP_ARM = "env/bootstrap/bootstrap-arm.tar.gz";
@@ -26,6 +27,7 @@ public final class EnvPaths {
     public static final String ASSET_BOOTSTRAP_X86 = "env/bootstrap/bootstrap-x86.tar.gz";
     /** x86_64 bootstrap for 64-bit Intel/ChromeOS/emulator userspaces. */
     public static final String ASSET_BOOTSTRAP_X64 = "env/bootstrap/bootstrap-x86_64.tar.gz";
+    public static final String ASSET_BOOTSTRAP_ARM_ZST = "env/bootstrap/bootstrap-arm.tar.zst";
     public static final String ASSET_MANIFEST = "env/manifest.json";
     public static final String ASSET_OVERLAY = "env/overlay";
     public static final String ASSET_PKG = "env/pkg";

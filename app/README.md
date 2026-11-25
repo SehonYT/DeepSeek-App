@@ -32,14 +32,14 @@ graph TD
         CSS["CoreServerService (Foreground Service + WakeLock)"]
         CSS --> CPS["CoreProcessSupervisor (Управление жизненным циклом ядра)"]
         CPS --> CL["CoreLauncher (Установка фазы 1 и запуск процесса)"]
-        CPS --> CRP["CoreReadyProbe (Зондирование https://127.0.0.1:port)"]
-        CPS --> OUW["OpenUrlWatcher (Перехват OAuth/URL из stdout потока)"]
-        CPS --> LS["Процесс language_server (Glibc / ARM64)"]
-        CSS --> AGD["Фоновый демон agy-daemon (CLI Task Engine)"]
+        CPS --> CRP["CoreReadyProbe (Зондирование http://127.0.0.1:port + tokenized URL)"]
+        CPS --> OUW["OpenUrlWatcher (Перехват URL ядра и OAuth из stdout)"]
+        CPS --> LS["Процесс DeepSeek Web CLI (Glibc / ARM64)"]
+        CSS --> AGD["Фоновый демон dsh-daemon (CLI Task Engine, python3)"]
     end
 
     subgraph Gateway_Layer ["Системный шлюз (System Gateway)"]
-        CSS --> SGS["SystemGatewayServer (HTTP Server на 127.0.0.1:45161)"]
+        CSS --> SGS["SystemGatewayServer (HTTP Server на 127.0.0.1:45260 + Bearer Token)"]
         SGS --> GD["GatewayDispatcher"]
         GD --> NH["NotificationHandler (Каналы задач и алертов)"]
         GD --> BH["BrowserHandler (Открытие системного браузера)"]
@@ -72,59 +72,54 @@ graph TD
 Ядро системы (`language_server`) компилируется под Linux/Glibc и выполняется в окружении Android через кастомный загрузчик `libloader.so` с эмуляцией инструкций LSE (`liblse_compat.so`).
 
 - **`CoreServerService`**: 
-  - Запускается как `ForegroundService` с типом `dataSync` и иконкой в трее (`ForegroundNotification`).
-  - Удерживает CPU WakeLock (`WakeLockHolder`) с флагом `PARTIAL_WAKE_LOCK`, гарантируя непрерывную работу агента при выключенном экране.
-  - Управляет жизненным циклом супервизора ядра, HTTP Gateway и фонового демона `agy-daemon`.
+  - Запускается как `ForegroundService` с типом `dataSync` и кликабельной иконкой в трее (`ForegroundNotification` с `PendingIntent` на `MainActivity`).
+  - Удерживает CPU WakeLock (`WakeLockHolder`) с флагом `PARTIAL_WAKE_LOCK` и проверкой `isHeld()`, гарантируя непрерывную работу агента при выключенном экране.
+  - Управляет жизненным циклом супервизора ядра и HTTP Gateway; фоновый демон `dsh-daemon` (fallback `agy-daemon`) запускается через `$PREFIX/bin/python3` только после готовности ядра (`onCoreReady`) и пропускается, если `python3` не установлен.
+- **`BootMetrics` & `BootStateStamp`**:
+  - Собирает сквозную телеметрию запуска (`[boot_metrics]` от `MainActivity`/`CoreServerService` до `dsh_boot.mjs` и первой отрисовки WebView) и хранит составной маркер `noBackupFilesDir/boot_state.stamp` для мгновенного пропуска проверок на теплом старте.
+- **`CoreEnvironment` & `DeviceProfile`**:
+  - Определяет профиль устройства (ABI 32/64-бит, наличие ARMv8 crypto/atomics/LSE, семейство SoC, legacy ARMv8.0-ядра вроде Cortex-A53/A57, объем RAM) и выставляет `GODEBUG`, `NODE_OPTIONS`, `UV_THREADPOOL_SIZE`, `NODE_COMPILE_CACHE` (в `noBackupFilesDir`), `DSH_DEVICE_TIER` и политику фоновых sidecar-задач.
 - **`CoreLauncher`**:
-  - Управляет установкой фазы 1 (распаковка и верификация ядра) и запуском нативного процесса.
-  - Содержит `killOrphanCoreProcesses()`: сканирует `/proc` и принудительно завершает (`SIGKILL`) любые зависшие orphan-процессы `language_server` от предыдущих сессий перед стартом, исключая ошибку `EADDRINUSE` (`listen: address already in use`) на фиксированных loopback-портах 45157/45158.
+  - Управляет установкой фазы 1 (`CoreInstaller`: ключ кэша по `manifestHash` и проверка `bin.js`, без лишней перераспаковки при обновлении APK; `TermuxPrefixRewriter` с маркером `length:mtime` для `bash`; `ShellBridgeInstaller` v4 с TLS-переменными) и запуском нативного процесса.
+  - Содержит `killOrphanCoreProcesses()`: сканирует `/proc` и принудительно завершает (`SIGKILL`) зависшие orphan-процессы (`runtime/dsh` / `apps/cli/lib/bin.js` с `--profile`) от предыдущих сессий перед стартом.
 - **`CoreProcessSupervisor`**:
-  - Запускает ядро в выделенном рабочем потоке (`CoreServerThread`).
-  - Непрерывно стримит объединенный поток stdout/stderr в `files/logs/core.log` и кольцевой буфер `LogRingBuffer`.
-  - Реализует политику самовосстановления (`CoreRestartPolicy`): экспоненциальный backoff при неожиданном падении (до 3 перезапусков). Если ядро проработало стабильно более 60 секунд (`SUSTAINED_READY_MS`), счетчик падений обнуляется.
-  - При фатальных ошибках фиксирует детальный стек в `CrashRecorder`.
-- **`CoreReadyProbe`**:
-  - Выполняет опрос готовности локального HTTPS порта с таймаутом до 60 секунд (`READY_TIMEOUT_MS = 60000`) для стабильного первого холодного запуска на процессорах ARMv8.0-A (Snapdragon 660 и др.).
-  - Выполняет криптографический Certificate Pinning по SHA-256 дайджесту сертификата `@raw/agy_core_cert`.
+  - Запускает ядро в выделенном рабочем потоке (`CoreServerThread`) с отдельным потоком `CoreStderrThread` для `core_stderr.log`.
+  - Непрерывно стримит редактированный вывод в ротируемые логи `files/logs/core.log` (`1.5 МБ`) и `files/logs/core_stderr.log` (`512 КБ`) через `CoreLogWriter` и кольцевой буфер `LogRingBuffer`.
+  - После открытия TCP-порта дожидается появления токенизированного URL в `OpenUrlWatcher.detectedWebUrl` (с таймаутом fallback 2000 мс), затем уведомляет `readyListener` и запускает фоновую доустановку `EnvInstaller`.
+  - Реализует политику самовосстановления (`CoreRestartPolicy`) и фиксирует дампы падений в `CrashRecorder` (включая `MemoryInfo` и ротацию до 10 последних файлов).
+- **`CoreReadyProbe` / `CoreUrl`**:
+  - Выполняет зондирование локального HTTP-порта (`http://127.0.0.1:<port>`, `CoreUrl.baseUrl`) с учетом обнаруженного токенизированного URL от `dsh web`.
 - **`OpenUrlWatcher`**:
-  - Решает проблему перехвата OAuth-авторизации Google (Google блокирует авторизацию внутри встроенного WebView).
-  - Считывает строки вывода `language_server` в реальном времени, выявляя маркеры `AGY_OPEN_URL=`, `ANTIGRAVITY_OPEN_URL:` и ссылки `accounts.google.com`.
-  - Перенаправляет пользователя в дефолтный внешний браузер через `CustomTabLauncher`.
-  - Также слушает защищенный broadcast `com.agy.ACTION_OPEN_URL`.
+  - Перехватывает URL локального веб-сервера (`dsh web:` / `http://127.0.0.1:<port>`) в `CoreRuntimeState.detectedWebUrl` (не перебивая его посторонними localhost-ссылками) и внешние OAuth-ссылки для открытия в браузере.
 
-### 2.2. WebView, UI и загрузка приложения (`com.agy.ui`)
+### 2.2. WebView, UI и загрузка приложения (`com.dsh.ui`)
 
 - **Двухфазная схема запуска (Splash & Ready Flow)**:
-  1. `MainActivity` стартует с нативным Canvas-экраном (`NativeSplashDotsView`), не инициализируя тяжелый Chromium WebView для анимации трех точек (экономия ~40 МБ RAM).
-  2. Параллельно `CoreServerService` распаковывает ядро и ожидает готовности локального HTTPS порта (зонд `CoreReadyProbe`).
-  3. После ответа порта `WebViewHost.loadApp()` инжектирует HTML и конфигурацию.
-  4. Скрытие сплэша происходит только по сигналу первого рендера из JavaScript (`window.Android.onUiReady()`), исключая мерцание белого экрана.
-- **`LocalAssetServer`**:
-  - Перехватывает вызовы `shouldInterceptRequest` в `AgyWebViewClient` для Same-Origin адреса `https://127.0.0.1:<port>/*`.
-  - Статические файлы (`files/web/*`) отдаются напрямую из локального кэша приложения в памяти, не нагружая Go-сервер ядра. RPC и веб-сокеты (`/exa.*`, `/jetski.*`, streaming) прозрачно пропускаются к ядру.
+  1. `MainActivity` включает `FLAG_HARDWARE_ACCELERATED` и стартует с нативным Canvas-экраном (`NativeSplashDotsView`), не создавая второй `WebView` для анимации трех точек. Оверлейный `WebView` создается лениво только при ошибках/перезапуске и уничтожается после скрытия.
+  2. `SplashController` отслеживает `splashWatchdog` (отменяется при `dismissSplash()` и `onDestroy()`), а `AgyWebViewClient` хранит `mainFrameError`, предотвращая преждевременное скрытие сплэша при ошибках загрузки.
+  3. `WebViewFactory` и `WebSettingsFactory` используют `AgyWebView` с `LAYER_TYPE_NONE` и отключенным `setOffscreenPreRaster(false)`.
+  4. На доверенных origin (`TrustedCoreOrigin`) `AgyWebViewClient` инжектирует обработчик вставки изображений из буфера/IME (`ClipboardImageReader` + `window.__agPasteImage`), а `NetworkMonitor.RecoveryListener` уведомляет `MainActivity.notifyNetworkOnline()` при восстановлении сети.
 - **`AppHtmlInjector`**:
-  - Внедряет в `<head>` веб-бандла строгую директиву Content-Security-Policy (CSP).
-  - Инициализирует глобальные объекты `window.__APP_CONFIG__`, `window.__AG_ENDPOINTS__`, `window.__AG_CSRF__` и одноразовый криптографический токен `blobBridgeToken`.
+  - Внедряет в `<head>` веб-бандла строгую директиву Content-Security-Policy (CSP), `__APP_CONFIG__`, `__AG_ENDPOINTS__`, CSRF-метаданные и одноразовый `blobBridgeToken`.
 - **Файловый пикер и загрузки (`FileDownloader`)**:
-  - Обрабатывает загрузки обычных файлов и Base64 Blobs (`saveBlob`).
-  - Поддерживает выбор файлов и папок через Storage Access Framework (SAF) и сохранение персистентных разрешений (`takePersistableUriPermission`).
+  - Обрабатывает загрузки обычных файлов и Base64 Blobs (`saveBlob`), сбрасывая ожидающие blob-данные во временный файл при запросе разрешений (`clearPendingTask()` и `pruneStalePendingBlobsAsync()` при завершении активити).
 
-### 2.3. Системный шлюз (`com.agy.gateway`)
+### 2.3. Системный шлюз (`com.dsh.gateway`)
 
-Встроенный высокопроизводительный HTTP-сервер (`SystemGatewayServer`), слушающий строго на `127.0.0.1:45161` (с авто-фоллбэком на порт `+2` при занятости). Номер порта сохраняется в `files/logs/gateway.port`.
+Встроенный HTTP-сервер (`SystemGatewayServer`), слушающий на `127.0.0.1:45260` (порт берется из `BuildConfig.GATEWAY_PORT`, fallback `+1`), с пулом из 6 потоков. Порт и случайный per-boot токен (`0600`) сохраняются в `files/logs/gateway.port` и `files/logs/gateway.token`; запросы авторизуются в constant-time по заголовкам `Authorization: Bearer`, `X-DSH-Token` или `X-AGY-Token` (ответы `400`/`401`/`404`/`413`).
 
-Шлюз обеспечивает мост между окружением Linux (bash-скрипты, CLI-утилиты `agy-notify`, `agy-daemon`) и нативными Android API:
+Шлюз обеспечивает мост между окружением Linux (`dsh-notify`, `dsh-daemon`) и нативными Android API:
 
 | Команда | Обработчик | Описание |
 | :--- | :--- | :--- |
-| `notify` | `NotificationHandler` | Публикация, обновление прогресса и отмена Android-уведомлений в каналах `agy_tasks` и `agy_alerts`. |
+| `notify` | `NotificationHandler` | Публикация (`BigTextStyle`, кликабельный `PendingIntent` на `MainActivity`), `postAgentAlert` и отмена уведомлений в каналах `dsh_tasks` и `dsh_alerts`. |
 | `open_url` | `BrowserHandler` | Открытие внешних ссылок и системных документов через `UriDispatcher`. |
 | `wakelock` | `PowerHandler` | Захват и освобождение именованных частичных WakeLock'ов для длительных скриптов. |
 | `clipboard` / `clipboard_set` | `ClipboardHandler` | Асинхронное чтение и запись в системный буфер обмена на UI-потоке. |
 | `system_info` | `DeviceHandler` | Сбор телеметрии: уровень заряда батареи, статус зарядки, тип сети, свободная память и диск. |
 | `vibrate` | `DeviceHandler` | Тактильный отклик (Haptic Feedback) заданной длительности. |
 | `toast` | `DeviceHandler` | Отображение нативных всплывающих сообщений (Toast). |
-| `exec` | `ExecHandler` | Выполнение команд в шелле (`/system/bin/sh` или повышенный `rish` через Shizuku) с таймаутом и захватом потоков. |
+| `exec` | `ExecHandler` | Выполнение команд с ограничением параллелизма (`Semaphore(2)`), зажатием таймаута `100..300000` мс, лимитом вывода 256 КБ, `destroyForcibly()`, `TMPDIR`/`GIT_*_NOSYSTEM=1` и префлайтом `RishLocator.hasDex()` для `rish`. |
 | `/gateway/status` | `SystemGatewayServer` | Проверка состояния шлюза (health check). |
 | `/gateway/logs` | `SystemGatewayServer` | Чтение последних строк системного лога из кольцевого буфера памяти. |
 | `/gateway/commands` | `SystemGatewayServer` | История выполненных шлюзом команд и их статусов. |

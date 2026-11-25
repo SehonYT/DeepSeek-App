@@ -30,6 +30,10 @@ ensure_dirs() { mkdir -p "$PKG_DB" "$PKG_CACHE" "$PKG_INDEX" "$PKG_ROOT/tmp"; }
 # Accepts file/dir paths as arguments, or list of file paths via stdin (newline
 # or null-separated). If no targets are provided or stdin is empty, scans $PREFIX.
 rewrite_prefix() {
+    if command -v python3 >/dev/null 2>&1 && [ -f "${PKG_LIB:-}/pkg_core.py" ]; then
+        python3 -B "$PKG_LIB/pkg_core.py" rewrite-prefix "$PREFIX" "$@"
+        return $?
+    fi
     local f esc pattern='/data/(data|user/[0-9]+)/[^/]*/files/usr'
     # Escape sed-replacement metacharacters in $PREFIX (never expected, cheap).
     esc="$(printf '%s' "$PREFIX" | sed 's/[\\&@]/\\&/g')"
@@ -86,7 +90,12 @@ load_conf() {
     : "${PKG_REPOS:=https://packages.termux.dev/apt/termux-main}"
     : "${PKG_CHANNEL:=stable}"
     : "${PKG_COMPONENT:=main}"
-    : "${PKG_ARCH:=aarch64}"
+    if [ -z "${PKG_ARCH:-}" ]; then
+        case "$(uname -m 2>/dev/null || echo aarch64)" in
+            armv7*|armv8l|arm*) PKG_ARCH=arm ;;
+            *) PKG_ARCH=aarch64 ;;
+        esac
+    fi
     # data.tar paths are ./data/data/com.<id>/files/usr/... -> 6 components.
     # deb_files strips by component count, not by a hardcoded prefix string.
     : "${PKG_DEB_STRIP:=6}"

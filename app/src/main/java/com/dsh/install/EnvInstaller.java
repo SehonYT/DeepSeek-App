@@ -91,30 +91,31 @@ public final class EnvInstaller {
         return arch == Arch.ARM32 || arch == Arch.X86;
     }
 
-    /** The bundled bootstrap asset that matches this device ABI, if any. */
-    private static String bootstrapAssetForArch(android.content.res.AssetManager assets) {
-        String candidate;
+    /**
+     * Picks the bootstrap asset for this device ABI, preferring zstd when the
+     * native decompressor is available. Returns null when no userspace for this
+     * ABI is bundled (e.g. the wrong split APK was installed).
+     */
+    private static String pickBootstrapForArch(Context ctx, android.content.res.AssetManager assets) {
+        boolean hasZstd = TarExtractor.findZstdBinary(ctx) != null;
         switch (deviceArch()) {
             case ARM64:
-                candidate = EnvPaths.ASSET_BOOTSTRAP;
-                break;
+                return hasZstd
+                        ? AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP_ZST,
+                                EnvPaths.ASSET_BOOTSTRAP, EnvPaths.ASSET_BOOTSTRAP_PLAIN)
+                        : AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP,
+                                EnvPaths.ASSET_BOOTSTRAP_PLAIN);
             case ARM32:
-                candidate = EnvPaths.ASSET_BOOTSTRAP_ARM;
-                break;
+                return hasZstd
+                        ? AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP_ARM_ZST,
+                                EnvPaths.ASSET_BOOTSTRAP_ARM)
+                        : AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP_ARM);
             case X86_64:
-                candidate = EnvPaths.ASSET_BOOTSTRAP_X64;
-                break;
+                return AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP_X64);
             case X86:
             default:
-                candidate = EnvPaths.ASSET_BOOTSTRAP_X86;
-                break;
+                return AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP_X86);
         }
-        String picked = AssetPicker.pick(assets, candidate);
-        if (picked == null) {
-            Log.w(TAG, "no bootstrap bundled for ABI " + primaryAbi()
-                    + " (wanted " + candidate + "); falling back to aarch64/arm assets");
-        }
-        return picked;
     }
 
     public static boolean isInstalled(Context context) {
@@ -127,16 +128,55 @@ public final class EnvInstaller {
         if (!basic) {
             return false;
         }
-        // Verify the prefix can actually execute on EVERY ABI, not only 32-bit.
-        // A prefix left half-written by an interrupted extraction (or built for a
-        // different ABI by an older build) satisfies the file checks above but
-        // cannot run, and previously stayed "installed" forever because nothing
-        // re-tested it.
-        if (!bashSmokeTest(context, prefix)) {
+        // Verify the prefix can actually execute on EVERY ABI. A prefix left
+        // half-written by an interrupted extraction (or built for a different ABI
+        // by an older build) satisfies the file checks above but cannot run, and
+        // previously stayed "installed" forever because nothing re-tested it.
+        // The smoke marker lets a known-good prefix skip the (slower) exec check.
+        if (!hasSmokeMarker(context, prefix) && !bashSmokeTest(context, prefix)) {
             Log.w(TAG, "installed prefix bash failed its smoke test; a reinstall is required");
             return false;
         }
         return true;
+    }
+
+    public static String readInstalledBundleId(Context context) {
+        File prefix = prefix(context);
+        Properties state = readState(new File(prefix, EnvPaths.MARKER));
+        return state.getProperty("bundle_id", "");
+    }
+
+    public static String readBundledBundleId(Context context) {
+        try {
+            return EnvBundleManifest.load(context.getAssets()).bundleId;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static boolean hasSmokeMarker(Context context, File prefix) {
+        File smoke = new File(prefix, ".smoke-ok");
+        if (!smoke.isFile()) {
+            return false;
+        }
+        String bundleId = readInstalledBundleId(context);
+        if (bundleId.isEmpty()) {
+            return false;
+        }
+        try {
+            String content = com.dsh.util.IoUtil.readAll(new FileInputStream(smoke), "UTF-8").trim();
+            return (bundleId + ":" + context.getPackageName()).equals(content);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static void writeSmokeMarker(Context context, File prefix, String bundleId) {
+        try {
+            AtomicFileWriter.writeText(new File(prefix, ".smoke-ok"),
+                    bundleId + ":" + context.getPackageName() + "\n");
+        } catch (Exception ignored) {
+        }
     }
 
     /** @return true when the prefix was built in this call. */
@@ -153,12 +193,13 @@ public final class EnvInstaller {
         validatePrefixLocation(ctx, prefix);
 
         EnvBundleManifest manifest = EnvBundleManifest.load(assets);
-        String bootstrapAsset = bootstrapAssetForArch(assets);
+        // Choose the userspace that matches this device ABI. Prefer a zstd
+        // archive when the native decompressor is available (faster install),
+        // and fall back to gzip. Selected purely by ABI, so a split APK that
+        // bundles only its own tarball resolves correctly and a mismatched split
+        // fails with an actionable message instead of an exec failure.
+        String bootstrapAsset = pickBootstrapForArch(ctx, assets);
         if (bootstrapAsset == null) {
-            // No userspace for this device ABI. Per-ABI split APKs only bundle the
-            // matching tarball, so this means the user installed the wrong split
-            // (or an ABI we do not build). Falling back to the aarch64 bootstrap
-            // would guarantee an exec failure; report the real cause instead.
             throw new IllegalStateException("this build does not include a userspace for "
                     + primaryAbi() + " (device ABI); install the matching APK split or the"
                     + " universal build");
@@ -201,32 +242,16 @@ public final class EnvInstaller {
                 throw new IOException("cannot create staging prefix: " + stage);
             }
             String targetPrefix = prefix.getAbsolutePath();
-            // Pick the manifest entry that describes the bootstrap actually used.
-            // Each bundled ABI is inside the signed manifest, so a swapped or
-            // truncated archive still fails closed.
-            String expectedSha = manifest.bootstrapSha256;
-            int expectedSymlinks = manifest.bootstrapSymlinkCount;
-            if (EnvPaths.ASSET_BOOTSTRAP_ARM.equals(bootstrapAsset)) {
-                if (manifest.bootstrapArmSha256 != null) {
-                    expectedSha = manifest.bootstrapArmSha256;
-                    expectedSymlinks = manifest.bootstrapArmSymlinkCount;
-                }
-            } else if (EnvPaths.ASSET_BOOTSTRAP_X86.equals(bootstrapAsset)) {
-                if (manifest.bootstrapX86Sha256 != null) {
-                    expectedSha = manifest.bootstrapX86Sha256;
-                    expectedSymlinks = manifest.bootstrapX86SymlinkCount;
-                }
-            } else if (EnvPaths.ASSET_BOOTSTRAP_X64.equals(bootstrapAsset)) {
-                if (manifest.bootstrapX64Sha256 != null) {
-                    expectedSha = manifest.bootstrapX64Sha256;
-                    expectedSymlinks = manifest.bootstrapX64SymlinkCount;
-                }
-            }
-            BootstrapExtractor.extract(assets, bootstrapAsset, stage,
+            // Resolve the manifest entry describing the bootstrap actually used,
+            // including ABI-specific zstd variants, so a swapped or truncated
+            // archive still fails closed.
+            String expectedSha = manifest.sha256ForArch(deviceArch());
+            int expectedSymlinks = manifest.symlinkCountForArch(deviceArch());
+            BootstrapExtractor.extract(context, assets, bootstrapAsset, stage,
                     expectedSha, expectedSymlinks);
             OverlayCopier.overlay(assets, EnvPaths.ASSET_OVERLAY, stage);
             PkgInstaller.install(assets, stage, targetPrefix);
-            prepareTree(assets, stage, targetPrefix);
+            prepareTree(context, assets, stage, targetPrefix, manifest);
             writeMarker(stage, manifest, expectedSha,
                     expectedSha, false, targetPrefix);
             validateTree(stage, expectedSymlinks);
@@ -255,6 +280,7 @@ public final class EnvInstaller {
                 restoreQuarantine(prefix, quarantined);
                 throw new IOException("installed bash failed its smoke test; prefix preserved for diagnosis");
             }
+            writeSmokeMarker(context, prefix, manifest.bundleId);
             Log.i(TAG, "env prefix installed atomically: " + prefix
                     + " bundle=" + manifest.bundleId);
         } catch (Exception e) {
@@ -283,14 +309,17 @@ public final class EnvInstaller {
         // A full bootstrap replacement can overwrite package-managed/user edits.
         // Preserve legacy/mutable prefixes and report the pending base migration
         // instead of silently deleting or rebasing their contents.
+        boolean isArm = EnvPaths.ASSET_BOOTSTRAP_ARM.equals(bootstrapAsset)
+                || EnvPaths.ASSET_BOOTSTRAP_ARM_ZST.equals(bootstrapAsset);
+        String targetBootstrapSha = manifest.expectedBootstrapSha256(isArm);
         boolean bootstrapKnown = oldBootstrap != null && !"legacy".equals(oldBootstrap);
-        boolean bootstrapMatches = manifest.bootstrapSha256.equals(oldBootstrap);
+        boolean bootstrapMatches = targetBootstrapSha != null && targetBootstrapSha.equals(oldBootstrap);
         boolean bootstrapPending = !bootstrapMatches;
         String appliedBootstrap = bootstrapKnown ? oldBootstrap : "legacy";
         if (bootstrapKnown && bootstrapPending) {
             Log.w(TAG, "bootstrap changed; preserving mutable prefix until an explicit migration "
                     + "is available (installed=" + oldBootstrap + ", bundled="
-                    + manifest.bootstrapSha256 + ")");
+                    + targetBootstrapSha + ")");
         } else if (!bootstrapKnown && bootstrapPending) {
             Log.w(TAG, "legacy prefix has no base version; preserving it and refreshing only "
                     + "AGY-managed overlay/pkg layers");
@@ -323,17 +352,24 @@ public final class EnvInstaller {
         TermuxHooksRemover.remove(prefix);
         validateTree(prefix, 0);
         writeMarker(prefix, manifest, appliedBootstrap,
-                manifest.bootstrapSha256, bootstrapPending, targetPrefix);
+                targetBootstrapSha, bootstrapPending, targetPrefix);
         Log.i(TAG, "env managed layers ready: overlay=" + (overlayChanged ? "updated" : "current")
                 + " pkg=" + (pkgChanged ? "updated" : "current")
                 + " bootstrap=" + (bootstrapPending ? "pending" : "current"));
     }
 
-    private static void prepareTree(AssetManager assets, File root, String targetPrefix) {
-        // Repair every path representation before anything can execute from the prefix.
-        TermuxSymlinkFixer.fix(root, targetPrefix);
-        TermuxShebangRewriter.rewrite(root, targetPrefix);
-        TermuxPrefixRewriter.rewrite(root, targetPrefix);
+    private static void prepareTree(Context context, AssetManager assets, File root,
+                                    String targetPrefix, EnvBundleManifest manifest) {
+        boolean prepatched = isPrepatchedForTarget(context, root, targetPrefix, manifest);
+        if (prepatched) {
+            Log.i(TAG, "bootstrap pre-patched for " + targetPrefix + "; skipping runtime tree rewrite");
+        } else {
+            // Repair every path representation before anything can execute from the prefix.
+            TermuxSymlinkFixer.fix(root, targetPrefix);
+            TermuxShebangRewriter.rewrite(root, targetPrefix);
+            TermuxPrefixRewriter.rewrite(root, targetPrefix);
+        }
+        // Only ensure overlay/pkg scripts have exec bits (tar extraction already set inline modes).
         FileModeUtil.recursiveSetExec(new File(root, "bin"));
         FileModeUtil.setExec(new File(root, "libexec/pkg/pkg"));
         File fixPaths = new File(root, EnvPaths.FIX_PATHS_REL);
@@ -342,6 +378,30 @@ public final class EnvInstaller {
         }
         BusInstaller.install(assets, root);
         TermuxHooksRemover.remove(root);
+    }
+
+    private static boolean isPrepatchedForTarget(Context context, File root, String targetPrefix,
+                                                 EnvBundleManifest manifest) {
+        if (context == null || manifest == null) {
+            return false;
+        }
+        String pkg = context.getPackageName();
+        String expectedPrefix = "/data/user/0/" + pkg + "/files/" + EnvPaths.PREFIX_DIR;
+        if (!expectedPrefix.equals(targetPrefix)) {
+            return false;
+        }
+        if (pkg.equals(manifest.prepatchedPackage)) {
+            return true;
+        }
+        File prepatchedMarker = new File(root, ".dsh-prepatched");
+        if (prepatchedMarker.isFile()) {
+            try {
+                String bakedPkg = com.dsh.util.IoUtil.readAll(new FileInputStream(prepatchedMarker), "UTF-8").trim();
+                return pkg.equals(bakedPkg);
+            } catch (Exception ignored) {
+            }
+        }
+        return false;
     }
 
     private static void validateTree(File prefix, int minimumSymlinks) {

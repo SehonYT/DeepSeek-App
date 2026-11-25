@@ -211,11 +211,12 @@ def record_crash_snapshot(error_msg: str, dump_path: str, extra_context: Dict[st
 ### 7.1. IPC-клиент (`bridge/client.py`)
 - `resolve_gateway_url() -> str`:
   1. Проверяет переменную окружения `AGY_GATEWAY_URL`.
-  2. Ищет файл динамического порта `gateway.port` в `$HOME/logs/gateway.port`, `app_root/logs/gateway.port` и стандартных директориях `com.agy.dev` / `com.agy`.
-  3. При отсутствии файла выбирает порт по умолчанию: `45161` для `DEV_MODE=1` / `com.agy.dev`, либо `45160` для production.
+  2. Ищет файл динамического порта `gateway.port` в `$HOME/logs/gateway.port`, `app_root/logs/gateway.port` и стандартных директориях `com.dsh.dev` / `com.dsh` (а также legacy `com.agy*`).
+  3. При отсутствии файла выбирает порт по умолчанию: `45261` для `DEV_MODE=1` / `com.dsh.dev`, либо `45260` для production.
 - `send_command(command: str, payload: dict = None, gateway_url: str = None) -> dict`:
+  - Автоматически читает токен из `logs/gateway.token` и передает его в заголовках `Authorization: Bearer`, `X-DSH-Token` и `X-AGY-Token`.
   - Отправляет HTTP POST запрос с JSON-конвертом `{command, payload}` на эндпоинт `/gateway`.
-  - Автоматический failover: при недоступности основного порта выполняет попытку переподключения на альтернативный порт (`45160` <-> `45161`).
+  - Автоматический failover: при недоступности основного порта выполняет попытку переподключения на альтернативный порт (`45260` <-> `45261`).
   - Возвращает `{ok: False, fallback: True, error: ...}` при невозможности связаться со шлюзом без генерации необработанных исключений.
 
 ### 7.2. Типизированный фасад команд (`bridge/commands.py`)

@@ -35,7 +35,7 @@ public final class ShellBridgeInstaller {
     /** Records which prefix the bulk bridges were generated for. Bump when the
      *  bridge script format changes so a warm launch regenerates them once. */
     private static final String BRIDGE_MARKER = ".agy-bridges";
-    private static final int BRIDGE_FORMAT = 3;
+    public static final int BRIDGE_FORMAT = 4;
 
     private ShellBridgeInstaller() {
     }
@@ -120,25 +120,30 @@ public final class ShellBridgeInstaller {
             Log.w(TAG, "cannot create " + bin + "; skipping shell bridges");
             return;
         }
-        // Always ensure fallback shells and shims exist FIRST
-        installFallbackBridges(bin, rm.appContext());
-        installOpenUrlShims(bin, rm.appContext());
-
         File prefix = EnvInstaller.prefix(rm.appContext());
         File prefixBash = new File(prefix, "bin/bash");
         if (!prefixBash.isFile()) {
+            // Ensure fallback shells & shims exist when prefix is absent
+            installFallbackBridges(bin, rm.appContext());
+            installOpenUrlShims(bin, rm.appContext());
             Log.w(TAG, "prefix bash missing (" + prefixBash + "); keeping fallback shell bridges");
             return;
         }
-        String appId = rm.appContext().getPackageName();
-        writeBridge(new File(bin, "bash"), prefix, "bash", appId);
-        writeBridge(new File(bin, "sh"), prefix, "bash", appId);
         File[] prefixTools = new File(prefix, "bin").listFiles();
         int toolCount = countFiles(prefixTools);
         File marker = new File(bin, BRIDGE_MARKER);
-        if (!force && markerMatches(marker, prefix, toolCount)) {
+        if (!force && markerMatches(marker, prefix, toolCount)
+                && new File(bin, "bash").canExecute()
+                && new File(bin, "xdg-open").canExecute()
+                && new File(bin, "torch").canExecute()) {
             return;
         }
+        // Refresh fallback shells and shims before generating bionic bridges
+        installFallbackBridges(bin, rm.appContext());
+        installOpenUrlShims(bin, rm.appContext());
+        String appId = rm.appContext().getPackageName();
+        writeBridge(new File(bin, "bash"), prefix, "bash", appId);
+        writeBridge(new File(bin, "sh"), prefix, "bash", appId);
         if (prefixTools != null) {
             for (File toolFile : prefixTools) {
                 if (toolFile.isFile()) {
@@ -248,6 +253,8 @@ public final class ShellBridgeInstaller {
         sb.append("export OPENSSL_CONF=\"$PREFIX/etc/tls/openssl.cnf\"\n");
         sb.append("export SSL_CERT_FILE=\"$PREFIX/etc/tls/cert.pem\"\n");
         sb.append("export CURL_CA_BUNDLE=\"$PREFIX/etc/tls/cert.pem\"\n");
+        sb.append("export GIT_SSL_CAINFO=\"$PREFIX/etc/tls/cert.pem\"\n");
+        sb.append("export NODE_EXTRA_CA_CERTS=\"$PREFIX/etc/tls/cert.pem\"\n");
         sb.append("export GIT_CONFIG_NOSYSTEM=1\n");
         sb.append("export GIT_ATTR_NOSYSTEM=1\n");
         sb.append("export GIT_TEMPLATE_DIR=\"$PREFIX/share/git-core/templates\"\n");

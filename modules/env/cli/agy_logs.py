@@ -17,16 +17,19 @@ if MODULES_ENV_DIR not in sys.path:
     sys.path.insert(0, MODULES_ENV_DIR)
 
 try:
-    from bridge.client import resolve_gateway_url
+    from bridge.client import resolve_gateway_url, resolve_gateway_token
 except ImportError:
     try:
-        from modules.env.bridge.client import resolve_gateway_url
+        from modules.env.bridge.client import resolve_gateway_url, resolve_gateway_token
     except ImportError:
         resolve_gateway_url = None
+        resolve_gateway_token = None
 
 def get_gateway_base():
     if resolve_gateway_url:
         return resolve_gateway_url().rstrip("/")
+    if "DSH_GATEWAY_URL" in os.environ:
+        return os.environ["DSH_GATEWAY_URL"].rstrip("/")
     if "AGY_GATEWAY_URL" in os.environ:
         return os.environ["AGY_GATEWAY_URL"].rstrip("/")
     home = os.environ.get("HOME")
@@ -34,6 +37,8 @@ def get_gateway_base():
     if home:
         candidates.append(os.path.join(home, "logs", "gateway.port"))
     candidates.extend([
+        "/data/user/0/com.dsh.dev/files/logs/gateway.port",
+        "/data/user/0/com.dsh/files/logs/gateway.port",
         "/data/user/0/com.agy.dev/files/logs/gateway.port",
         "/data/user/0/com.agy/files/logs/gateway.port"
     ])
@@ -46,8 +51,8 @@ def get_gateway_base():
                         return f"http://127.0.0.1:{p}/gateway"
             except Exception:
                 pass
-    is_dev = os.environ.get("DEV_MODE") == "1" or os.environ.get("AGY_APPLICATION_ID") == "com.agy.dev"
-    return "http://127.0.0.1:45161/gateway" if is_dev else "http://127.0.0.1:45160/gateway"
+    is_dev = os.environ.get("DEV_MODE") == "1" or os.environ.get("AGY_APPLICATION_ID") == "com.dsh.dev"
+    return "http://127.0.0.1:45261/gateway" if is_dev else "http://127.0.0.1:45260/gateway"
 
 GATEWAY_BASE = get_gateway_base()
 GATEWAY_LOGS_URL = f"{GATEWAY_BASE}/logs"
@@ -64,9 +69,41 @@ CLR_CYAN = "\033[36m"
 CLR_GRAY = "\033[90m"
 
 
+def get_gateway_token():
+    if resolve_gateway_token:
+        return resolve_gateway_token()
+    env_tok = (os.environ.get("DSH_GATEWAY_TOKEN") or os.environ.get("AGY_GATEWAY_TOKEN") or "").strip()
+    if env_tok:
+        return env_tok
+    home = os.environ.get("HOME")
+    candidates = [os.path.join(home, "logs", "gateway.token")] if home else []
+    candidates.extend([
+        "/data/user/0/com.dsh.dev/files/logs/gateway.token",
+        "/data/user/0/com.dsh/files/logs/gateway.token",
+        "/data/user/0/com.agy.dev/files/logs/gateway.token",
+        "/data/user/0/com.agy/files/logs/gateway.token",
+    ])
+    for tfile in candidates:
+        if os.path.isfile(tfile):
+            try:
+                with open(tfile, "r", encoding="utf-8") as f:
+                    tok = f.read().strip()
+                    if tok:
+                        return tok
+            except Exception:
+                pass
+    return ""
+
+
 def fetch_from_gateway(url):
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "agy-logs"})
+        headers = {"User-Agent": "dsh-logs"}
+        tok = get_gateway_token()
+        if tok:
+            headers["X-DSH-Token"] = tok
+            headers["X-AGY-Token"] = tok
+            headers["Authorization"] = f"Bearer {tok}"
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=1.0) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception:

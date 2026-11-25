@@ -4,10 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-    branches:
-      - main
-      - master
-      - dev
   workflow_dispatch:
     inputs:
       tag_name:
@@ -22,6 +18,10 @@ on:
         description: 'Mark as Pre-release'
         type: boolean
         default: false
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -52,8 +52,9 @@ jobs:
       - name: Install Android Build Tools & System Utilities
         run: |
           for i in 1 2 3; do
-            sudo apt-get update && sudo apt-get install -y --fix-missing aapt zipalign apksigner file zip unzip gzip && break || sleep 5
+            sudo apt-get update && sudo apt-get install -y --fix-missing aapt zipalign apksigner file zip unzip gzip zstd && break || sleep 5
           done
+          npm install -g esbuild
 
       - name: Prepare Android Build Tools & Keystore
         run: |
@@ -85,163 +86,77 @@ jobs:
             curl -fsSL -o tools/r8.jar "https://dl.google.com/dl/android/maven2/com/android/tools/r8/8.2.42/r8-8.2.42.jar"
           fi
 
-      - name: Assemble DeepSeek Harness Runtime Bundle
+      - name: Cross-Compile Native Binaries (android-arm pty.node & jniLibs zstd)
         run: |
           mkdir -p archives
-          echo "[CI] 1. Cloning deepseek-harness source..."
+          echo "[CI] Cloning deepseek-harness source..."
           git clone --depth 1 https://github.com/salmanbappi/deepseek-harness.git archives/dsh-source
 
-          echo "[CI] 2. Assembling compact runtime bundle..."
-          python3 scripts/assemble_runtime.py archives/dsh-source archives/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz
+          if [ ! -f "vendor/native/android-arm/pty.node" ]; then
+            echo "[CI] Building 32-bit armeabi-v7a pty.node with Android NDK..."
+            bash scripts/build_pty_node.sh --arch android-arm --dsh-source archives/dsh-source
+          fi
+          echo "[CI] Building native zstd decompression binaries (libdsh_zstd.so)..."
+          bash scripts/build_zstd.sh --arch all
+          ls -lh vendor/native/android-arm64/pty.node vendor/native/android-arm/pty.node app/src/main/jniLibs/*/libdsh_zstd.so
 
-          echo "[CI] 3. Verifying assembled archive..."
-          ls -lh archives/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz
-
-          echo "[CI] 4. Verifying per-ABI node-pty prebuilds are present..."
-          python3 - <<'PY'
-          import tarfile, sys
-          required = [
-              "node_modules/node-pty/prebuilds/android-arm64/pty.node",
-              "node_modules/node-pty/prebuilds/android-arm/pty.node",
-          ]
-          with tarfile.open("archives/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz") as t:
-              names = set(n.lstrip("./") for n in t.getnames())
-          missing = [r for r in required if r not in names]
-          if missing:
-              print("::error::runtime bundle is missing node-pty prebuilds: %s" % missing)
-              sys.exit(1)
-          # build/Release must not exist: it is arch-specific and shadows prebuilds.
-          shadow = [n for n in names if "/node-pty/build/Release/" in n]
-          if shadow:
-              print("::error::arch-specific build/Release shadow present: %s" % shadow)
-              sys.exit(1)
-          print("[CI] node-pty prebuilds OK for android-arm64 + android-arm")
-          PY
-
-      - name: Build per-ABI Android Userspaces (arm64, arm32, x86, x86_64)
+      - name: Assemble DeepSeek Harness Runtime Bundles (Universal & Split ABIs, .tar.zst)
         run: |
-          # Every ABI needs its own Bionic prefix: bash/node/libs are native ELFs
-          # and a device can only execute its own ABI. The build downloads the
-          # pinned Termux bootstraps and the matching Node.js .deb stack, then
-          # fails closed if any ABI is missing bin/node.
-          bash env/build.sh bootstrap
+          for arch in universal arm64-v8a armeabi-v7a; do
+            echo "[CI] Assembling runtime bundle for $arch..."
+            python3 scripts/assemble_runtime.py --arch "$arch" archives/dsh-source "archives/dsh-termux-prebuilt-v0.2.2-rc.3-${arch}.tar.zst"
+          done
+          ls -lh archives/dsh-termux-prebuilt-*.tar.zst
 
-          echo "[CI] Bundled userspaces:"
-          ls -lh env/bootstrap/bootstrap*.tar.gz
-
-      - name: Verify Bundled Userspaces Cover All ABIs
+      - name: Build Pre-Patched zstd Termux Bootstraps (arm64-v8a & armeabi-v7a)
         run: |
-          python3 - <<'PY'
-          import json, subprocess, sys, tarfile
-          expected = {
-              "bootstrap.tar.gz":         ("aarch64", "aarch64"),
-              "bootstrap-arm.tar.gz":     ("armeabi-v7a", "arm"),
-              "bootstrap-x86.tar.gz":     ("x86", "i686"),
-              "bootstrap-x86_64.tar.gz":  ("x86_64", "x86_64"),
-          }
-          failures = []
-          for name, (abi_label, _) in expected.items():
-              path = "env/bootstrap/" + name
-              try:
-                  with tarfile.open(path) as t:
-                      members = set(m.lstrip("./") for m in t.getnames())
-              except Exception as e:
-                  failures.append(f"{name}: cannot open ({e})")
-                  continue
-              for required in ("bin/bash", "bin/node", "bin/pkg", "lib/libtermux-exec.so"):
-                  if required not in members:
-                      failures.append(f"{name} ({abi_label}): missing {required}")
-              if not any(m.startswith("lib/libsqlite3.so") for m in members):
-                  failures.append(f"{name} ({abi_label}): missing libsqlite3")
-              print(f"[CI] {name} ({abi_label}): OK")
-          if failures:
-              for f in failures:
-                  print("::error::" + f)
-              sys.exit(1)
-          PY
-
-      - name: Stage Userspaces and Generate Env Manifest
-        run: |
-          bash env/build.sh assets
-          echo "[CI] Env manifest:"
-          cat env/dist/env/manifest.json
+          bash env/build.sh --arch universal bootstrap
+          ls -lh env/bootstrap/bootstrap*.tar.zst
 
       - name: Sync App Version from Tag
         run: |
           TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
-          CURRENT_CODE=$(sed -n 's/^APP_VERSION_CODE=//p' config/app.env | tr -d "[:space:]")
-          CURRENT_CODE=${CURRENT_CODE:-0}
           if [[ "$TAG" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then
             VER="${BASH_REMATCH[1]}"
+            echo "[CI] Updating config/app.env to version $VER (from $TAG)..."
+            sed -i -E "s/^APP_VERSION_NAME=.*/APP_VERSION_NAME=$VER/" config/app.env
             IFS='.' read -r major minor patch <<< "$VER"
             CODE=$(( major * 10000 + minor * 100 + patch ))
-            if [ "$CODE" -lt "$CURRENT_CODE" ]; then
-              echo "::error::refusing to downgrade: tag $TAG gives versionCode $CODE but app is already $CURRENT_CODE"
-              echo "::error::a lower versionCode cannot be installed over the existing app (INSTALL_FAILED_VERSION_DOWNGRADE)"
-              exit 1
-            fi
-            echo "[CI] Updating config/app.env to version $VER (code $CODE, from $TAG)..."
-            sed -i -E "s/^APP_VERSION_NAME=.*/APP_VERSION_NAME=$VER/" config/app.env
             sed -i -E "s/^APP_VERSION_CODE=.*/APP_VERSION_CODE=$CODE/" config/app.env
           fi
           cat config/app.env
 
-      - name: Build Universal APK (all ABIs, one file installs anywhere)
+      - name: Build DeepSeek Universal Release APK (dist/deepseek.apk)
         run: |
-          bash build.sh
+          bash build.sh --arch universal
 
-      - name: Build Per-ABI APKs (smaller downloads)
+      - name: Build DeepSeek ARM64 Split APK (dist/deepseek-arm64-v8a.apk)
         run: |
-          # Each split ships only the userspace its devices can execute:
-          # arm64 ~136MB, arm32 ~118MB, x86 ~136MB, x86_64 ~135MB
-          # versus ~349MB for the universal build.
-          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
-            echo "[CI] Building split APK for $abi"
-            bash build.sh --abi "$abi"
-          done
-          ls -lh dist/
+          bash build.sh --arch arm64-v8a
 
-      - name: Validate APK Set (ABIs, signing, version)
+      - name: Build DeepSeek ARMv7 Split APK (dist/deepseek-armeabi-v7a.apk)
         run: |
-          python3 - <<'PY'
-          import glob, os, re, subprocess, sys, zipfile
-          expected = {
-              'dist/deepseek.apk': set(),  # universal: checked below
-              'dist/deepseek-arm64-v8a.apk': {'assets/env/bootstrap/bootstrap.tar.gz'},
-              'dist/deepseek-armeabi-v7a.apk': {'assets/env/bootstrap/bootstrap-arm.tar.gz'},
-              'dist/deepseek-x86.apk': {'assets/env/bootstrap/bootstrap-x86.tar.gz'},
-              'dist/deepseek-x86_64.apk': {'assets/env/bootstrap/bootstrap-x86_64.tar.gz'},
-          }
-          all_bootstraps = {
-              'assets/env/bootstrap/bootstrap.tar.gz',
-              'assets/env/bootstrap/bootstrap-arm.tar.gz',
-              'assets/env/bootstrap/bootstrap-x86.tar.gz',
-              'assets/env/bootstrap/bootstrap-x86_64.tar.gz',
-          }
-          failures = []
-          for apk, want in expected.items():
-              if not os.path.isfile(apk):
-                  failures.append(f'{apk}: not produced'); continue
-              with zipfile.ZipFile(apk) as z:
-                  names = set(z.namelist())
-                  vers = z.read('assets/env/manifest.json') if 'assets/env/manifest.json' in names else b''
-              got = {n for n in names if n.startswith('assets/env/bootstrap/bootstrap') and n.endswith('.tar.gz')}
-              if not want:
-                  want = all_bootstraps
-              if got != want:
-                  failures.append(f'{apk}: bootstraps {sorted(got)} != {sorted(want)}')
-              # every pty ABI needed by the shipped userspaces must be present
-              pty = {n for n in names if 'node-pty/prebuilds/' in n and n.endswith('pty.node')}
-              print(f'[CI] {apk}: {len(got)} userspace(s), {len(pty)} pty prebuild(s), {os.path.getsize(apk)//(1024*1024)} MB')
-          if failures:
-              for f in failures: print('::error::' + f)
-              sys.exit(1)
-          print('[CI] APK set validated')
-          PY
+          bash build.sh --arch armeabi-v7a
+
+      - name: Build DeepSeek x86 Split APK (dist/deepseek-x86.apk)
+        run: |
+          bash build.sh --arch x86
+
+      - name: Build DeepSeek x86_64 Split APK (dist/deepseek-x86_64.apk)
+        run: |
+          bash build.sh --arch x86_64
 
       - name: Build DeepSeek Dev APK (dist/deepseek-dev.apk)
         run: |
-          bash build.sh --dev
+          bash build.sh --dev --arch universal
+
+      - name: Verify APK ABI Integrity
+        run: |
+          python3 scripts/verify_apk_abi.py dist/deepseek.apk --arch universal
+          python3 scripts/verify_apk_abi.py dist/deepseek-arm64-v8a.apk --arch arm64-v8a
+          python3 scripts/verify_apk_abi.py dist/deepseek-armeabi-v7a.apk --arch armeabi-v7a
+          python3 scripts/verify_apk_abi.py dist/deepseek-x86.apk --arch x86
+          python3 scripts/verify_apk_abi.py dist/deepseek-x86_64.apk --arch x86_64
 
       - name: Compute Cryptographic Checksums
         run: |
@@ -254,7 +169,12 @@ jobs:
         with:
           name: deepseek-binaries
           path: |
-            dist/*.apk
+            dist/deepseek.apk
+            dist/deepseek-arm64-v8a.apk
+            dist/deepseek-armeabi-v7a.apk
+            dist/deepseek-x86.apk
+            dist/deepseek-x86_64.apk
+            dist/deepseek-dev.apk
             dist/SHA256SUMS.txt
 
       - name: Publish GitHub Release
@@ -276,4 +196,4 @@ jobs:
             dist/SHA256SUMS.txt
           body: |
             ### DeepSeek Mobile for Android
-            Autonomous AI Coding Environment &bull; Native Termux Bionic Userspace &bull; ARM64
+            Autonomous AI Coding Environment &bull; Native Termux Bionic Userspace &bull; Universal (`arm64-v8a` + `armeabi-v7a`) &amp; ABI Splits

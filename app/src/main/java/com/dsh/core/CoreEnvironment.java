@@ -42,19 +42,27 @@ public final class CoreEnvironment {
                 + " appDataDir=" + rm.getAppDataDir().getAbsolutePath()
                 + " projectsDir=" + rm.getProjectsDir().getAbsolutePath()
                 + " TMPDIR=" + rm.appContext().getCacheDir().getAbsolutePath());
-        File certFile = rm.getCertFile();
+        File prefix = new File(files, com.dsh.install.EnvPaths.PREFIX_DIR);
+        File prefixCert = new File(prefix, "etc/tls/cert.pem");
+        File certFile = prefixCert.isFile() ? prefixCert : rm.getCertFile();
         if (certFile != null && certFile.exists()) {
             env.put("SSL_CERT_FILE", certFile.getAbsolutePath());
             env.put("NODE_EXTRA_CA_CERTS", certFile.getAbsolutePath());
             env.put("CURL_CA_BUNDLE", certFile.getAbsolutePath());
+            env.put("GIT_SSL_CAINFO", certFile.getAbsolutePath());
         }
+        File opensslConf = new File(prefix, "etc/tls/openssl.cnf");
+        if (opensslConf.isFile()) {
+            env.put("OPENSSL_CONF", opensslConf.getAbsolutePath());
+        }
+        env.put("GIT_CONFIG_NOSYSTEM", "1");
+        env.put("GIT_ATTR_NOSYSTEM", "1");
         String inheritedPath = env.get("PATH");
 
         // The core's PTY spawner uses $SHELL (or falls back to /bin/bash, which
         // does not exist on Android). Prefer the bridge wrapper in runtime/bin
         // which configures LD_LIBRARY_PATH, PATH, and unsets LD_PRELOAD before
         // execing the bionic bash binary.
-        File prefix = new File(files, com.dsh.install.EnvPaths.PREFIX_DIR);
         File prefixBash = new File(prefix, com.dsh.install.EnvPaths.BASH_REL);
         File runtimeBash = new File(bin, "bash");
         env.put("PREFIX", prefix.getAbsolutePath());
@@ -83,16 +91,41 @@ public final class CoreEnvironment {
         env.put("LC_ALL", "C.UTF-8");
 
         // Pure-Go resolver keeps DNS independent of Android's missing /etc.
+        DeviceProfile profile = DeviceProfile.detect(rm.appContext());
         String godebug = env.get("GODEBUG");
         StringBuilder godebugBuilder = new StringBuilder();
         if (godebug != null && !godebug.isEmpty()) {
             godebugBuilder.append(godebug).append(",");
         }
         godebugBuilder.append("netdns=go,asyncpreemptoff=1");
-        if (!hasArmHardwareCrypto()) {
+        if (!profile.hasHardwareCryptoAndLse) {
             Log.w(TAG, "CPU lacks ARMv8 crypto/atomics extension; disabling Go hardware crypto acceleration");
             godebugBuilder.append(",cpu.all=off,arm64.aes=off,arm64.pmull=off,arm64.sha1=off,arm64.sha2=off,arm64.sha3=off,arm64.sha512=off,arm64.crc32=off,arm64.atomics=off,arm64.cpuid=off");
         }
+        env.put("GODEBUG", godebugBuilder.toString());
+
+        // Tune Node/V8 heap and libuv threadpool for the detected SoC/RAM tier.
+        String nodeOpts = env.get("NODE_OPTIONS");
+        if (nodeOpts == null || !nodeOpts.contains("--max-old-space-size")) {
+            String memFlag = "--max-old-space-size=" + profile.nodeMaxOldSpaceMb;
+            env.put("NODE_OPTIONS", (nodeOpts == null || nodeOpts.trim().isEmpty())
+                    ? memFlag
+                    : (nodeOpts.trim() + " " + memFlag));
+        }
+        if (!env.containsKey("UV_THREADPOOL_SIZE")) {
+            env.put("UV_THREADPOOL_SIZE", String.valueOf(profile.uvThreadpoolSize));
+        }
+        env.put("DSH_DEVICE_TIER", profile.tier.id);
+        env.put("DSH_SOC_FAMILY", profile.socFamily);
+        env.put("DSH_TARGET_ARCH", com.dsh.BuildConfig.TARGET_ARCH);
+        env.put("DSH_FORK_WALL_MS", String.valueOf(System.currentTimeMillis()));
+        configureNodeCompileCache(rm.appContext(), profile.is32Bit, env);
+        Log.i(TAG, "device profile: tier=" + profile.tier.id
+                + " soc=" + profile.socFamily
+                + " 32bit=" + profile.is32Bit
+                + " cryptoLse=" + profile.hasHardwareCryptoAndLse
+                + " ramMb=" + profile.totalRamMb
+                + " maxOldSpaceMb=" + profile.nodeMaxOldSpaceMb);
 
         env.put("NODE_ENV", "production");
         env.put("DEEPSEEK_HOST", "127.0.0.1");
@@ -132,104 +165,94 @@ public final class CoreEnvironment {
         env.remove("LD_PRELOAD");
     }
 
-    private static Boolean sHasArmCrypto = null;
+    private static void configureNodeCompileCache(Context context, boolean is32Bit, Map<String, String> env) {
+        if (context == null || env.containsKey("NODE_COMPILE_CACHE")) {
+            return;
+        }
+        try {
+            File noBackup = context.getNoBackupFilesDir();
+            String envId = com.dsh.install.EnvInstaller.readBundledBundleId(context);
+            if (envId.isEmpty()) {
+                envId = com.dsh.install.EnvInstaller.readInstalledBundleId(context);
+            }
+            String coreHash = com.dsh.runtime.CoreInstaller.getExpectedRuntimeHash(context);
+            String envPart = envId.length() > 12 ? envId.substring(0, 12) : (envId.isEmpty() ? "0" : envId);
+            String corePart = coreHash.length() > 12 ? coreHash.substring(0, 12) : (coreHash.isEmpty() ? "0" : coreHash);
+            String cacheName = "v8-cache-" + (is32Bit ? "arm32" : "arm64") + "-" + envPart + "-" + corePart;
+            File cacheDir = new File(noBackup, cacheName);
+            if (!cacheDir.isDirectory()) {
+                cacheDir.mkdirs();
+            }
+            env.put("NODE_COMPILE_CACHE", cacheDir.getAbsolutePath());
+            pruneStaleCompileCachesAsync(noBackup, cacheName);
+        } catch (Throwable t) {
+            Log.w(TAG, "cannot configure NODE_COMPILE_CACHE: " + t.getMessage());
+        }
+    }
+
+    private static void pruneStaleCompileCachesAsync(File noBackup, String activeName) {
+        File[] children = noBackup.listFiles();
+        if (children == null) {
+            return;
+        }
+        boolean hasStale = false;
+        for (File child : children) {
+            if (child.isDirectory() && child.getName().startsWith("v8-cache-")
+                    && !activeName.equals(child.getName())) {
+                hasStale = true;
+                break;
+            }
+        }
+        if (!hasStale) {
+            return;
+        }
+        Thread cleaner = new Thread(() -> {
+            for (File child : children) {
+                if (child.isDirectory() && child.getName().startsWith("v8-cache-")
+                        && !activeName.equals(child.getName())) {
+                    deleteDirQuietly(child);
+                }
+            }
+        }, "V8CachePruner");
+        cleaner.setDaemon(true);
+        cleaner.start();
+    }
+
+    private static void deleteDirQuietly(File dir) {
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File f : files) {
+                if (f.isDirectory()) {
+                    deleteDirQuietly(f);
+                } else {
+                    f.delete();
+                }
+            }
+        }
+        dir.delete();
+    }
 
     /**
      * Determines whether the current device is capable of running background sidecars
      * (Automations / Scheduled Tasks) without triggering OOM (LMKD) or execution loops.
-     *
-     * Returns false on:
-     * - Budget SoCs lacking hardware crypto/atomics (e.g. MediaTek MT676x / Cortex-A53).
-     * - Devices flagged as isLowRamDevice or having < 3.5GB RAM (prevents LMKD kills).
      */
     public static boolean isSidecarsSupported(Context context) {
-        if (!hasArmHardwareCrypto()) {
-            Log.i(TAG, "sidecars disabled: CPU lacks ARMv8 crypto/atomics or is low-end MT676x SoC");
-            return false;
+        DeviceProfile profile = DeviceProfile.detect(context);
+        if (!profile.sidecarsSupported) {
+            Log.i(TAG, "sidecars disabled: tier=" + profile.tier.id
+                    + " cryptoLse=" + profile.hasHardwareCryptoAndLse
+                    + " 32bit=" + profile.is32Bit
+                    + " lowRam=" + profile.isLowRamDevice
+                    + " ramMb=" + profile.totalRamMb);
         }
-        if (context != null) {
-            try {
-                android.app.ActivityManager am = (android.app.ActivityManager)
-                        context.getSystemService(Context.ACTIVITY_SERVICE);
-                if (am != null) {
-                    if (am.isLowRamDevice()) {
-                        Log.i(TAG, "sidecars disabled: isLowRamDevice is true");
-                        return false;
-                    }
-                    android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
-                    am.getMemoryInfo(mi);
-                    if (mi.totalMem < 3500L * 1024 * 1024) {
-                        Log.i(TAG, "sidecars disabled: device RAM < 3.5GB (" + (mi.totalMem / (1024 * 1024)) + "MB)");
-                        return false;
-                    }
-                }
-            } catch (Throwable t) {
-                Log.w(TAG, "could not query memory info for sidecars probe: " + t.getMessage());
-                return false;
-            }
-        }
-        return true;
+        return profile.sidecarsSupported;
     }
 
     /**
      * Checks whether the current CPU supports ARMv8 Cryptography Extensions (AES & PMULL)
-     * and LSE atomics. On ARMv8.0 cores without hardware crypto (e.g. MediaTek Helio A22 / G25 /
-     * Cortex-A53), executing hardware crypto instructions raises SIGILL (exit code 132).
+     * and LSE atomics.
      */
-    public static synchronized boolean hasArmHardwareCrypto() {
-        if (sHasArmCrypto != null) {
-            return sHasArmCrypto;
-        }
-        String arch = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.US);
-        if (!arch.contains("aarch64") && !arch.contains("arm64") && !arch.contains("arm")) {
-            sHasArmCrypto = true;
-            return true;
-        }
-
-        // 0. ABI check: 32-bit userspace / devices (armeabi-v7a) lack 64-bit ARMv8 crypto/atomics
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
-            String[] abis64 = android.os.Build.SUPPORTED_64_BIT_ABIS;
-            if (abis64 == null || abis64.length == 0) {
-                Log.i(TAG, "device reports no 64-bit ABIs; disabling hardware acceleration");
-                sHasArmCrypto = false;
-                return false;
-            }
-        }
-
-        // 1. Direct SoC detection: MediaTek Helio A20/A22 (MT6761), G25/P22 (MT6762), G35/P35 (MT6765)
-        // are budget 4x/8x Cortex-A53 chipsets where ARMv8 Crypto Extension is physically omitted in silicon.
-        String hardware = android.os.Build.HARDWARE != null ? android.os.Build.HARDWARE.toLowerCase(java.util.Locale.US) : "";
-        String board = android.os.Build.BOARD != null ? android.os.Build.BOARD.toLowerCase(java.util.Locale.US) : "";
-        if (hardware.startsWith("mt676") || board.startsWith("mt676") || hardware.contains("mt6761") || hardware.contains("mt6762")) {
-            Log.i(TAG, "detected MediaTek Helio MT676x SoC (hardware=" + hardware + ", board=" + board + ") without crypto extension");
-            sHasArmCrypto = false;
-            return false;
-        }
-
-        // 2. Hardware feature inspection via /proc/cpuinfo
-        File cpuinfo = new File("/proc/cpuinfo");
-        try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(cpuinfo))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                line = line.trim().toLowerCase(java.util.Locale.US);
-                if (line.startsWith("features") || line.startsWith("flags")) {
-                    int colon = line.indexOf(':');
-                    if (colon >= 0) {
-                        String flags = line.substring(colon + 1);
-                        boolean hasAes = flags.contains("aes");
-                        boolean hasPmull = flags.contains("pmull");
-                        boolean hasAtomics = flags.contains("atomics");
-                        // Modern chips with hardware crypto and LSE have aes, pmull, and atomics
-                        sHasArmCrypto = hasAes && hasPmull && hasAtomics;
-                        return sHasArmCrypto;
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "could not read /proc/cpuinfo for crypto probe: " + t.getMessage());
-        }
-        // If unreadable or inconclusive on an ARM device, default to false (safe pure software crypto)
-        sHasArmCrypto = false;
-        return false;
+    public static boolean hasArmHardwareCrypto() {
+        return DeviceProfile.hasArmHardwareCrypto();
     }
 }

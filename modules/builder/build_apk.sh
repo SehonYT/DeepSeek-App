@@ -14,9 +14,27 @@ export LC_ALL=C.UTF-8
 
 export FAST_BUILD=0
 export DEV_MODE=0
+export TARGET_ARCH="${TARGET_ARCH:-universal}"
 export CUSTOM_PREFIX=""
 export CUSTOM_OUT=""
-export DSH_ABI=""
+
+normalize_arch() {
+    case "$1" in
+        universal|all|fat)
+            echo "universal"
+            ;;
+        arm64-v8a|arm64|aarch64|v8a|r8a)
+            echo "arm64-v8a"
+            ;;
+        armeabi-v7a|armeabi|arm|v7a|7a)
+            echo "armeabi-v7a"
+            ;;
+        *)
+            echo "[ERROR] Unsupported --arch '$1'. Expected: universal, arm64-v8a, or armeabi-v7a." >&2
+            exit 1
+            ;;
+    esac
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -28,6 +46,20 @@ while [ $# -gt 0 ]; do
             export DEV_MODE=1
             shift
             ;;
+        --arch|--abi)
+            if [ $# -lt 2 ]; then
+                echo "[ERROR] $1 requires a value (universal, arm64-v8a, armeabi-v7a)." >&2
+                exit 1
+            fi
+            TARGET_ARCH="$(normalize_arch "$2")"
+            export TARGET_ARCH
+            shift 2
+            ;;
+        --arch=*|--abi=*)
+            TARGET_ARCH="$(normalize_arch "${1#*=}")"
+            export TARGET_ARCH
+            shift
+            ;;
         --prefix)
             export CUSTOM_PREFIX="$2"
             shift 2
@@ -36,38 +68,30 @@ while [ $# -gt 0 ]; do
             export CUSTOM_OUT="$2"
             shift 2
             ;;
-        --abi)
-            # Build a single-ABI APK that ships only one userspace (smaller
-            # download). "universal" keeps every ABI so one file installs
-            # on any device.
-            export DSH_ABI="$2"
-            shift 2
-            ;;
         *)
             shift
             ;;
     esac
 done
 
+TARGET_ARCH="$(normalize_arch "$TARGET_ARCH")"
+export TARGET_ARCH
+
 BASE_PREFIX="${CUSTOM_PREFIX:-deepseek}"
-ABI_SUFFIX=""
-if [ -n "$DSH_ABI" ] && [ "$DSH_ABI" != "universal" ]; then
-    ABI_SUFFIX="-$DSH_ABI"
+ARCH_SUFFIX=""
+if [ "$TARGET_ARCH" != "universal" ]; then
+    ARCH_SUFFIX="-$TARGET_ARCH"
 fi
 
 if [ -n "$CUSTOM_OUT" ]; then
     OUT_APK="$CUSTOM_OUT"
-    EDITION_LABEL="CUSTOM OUTPUT ($OUT_APK)"
+    EDITION_LABEL="CUSTOM OUTPUT ($OUT_APK, arch=$TARGET_ARCH)"
 elif [ "$DEV_MODE" = "1" ]; then
-    OUT_APK="$DIST_DIR/${BASE_PREFIX}-dev${ABI_SUFFIX}.apk"
-    EDITION_LABEL="DEV EDITION (com.dsh.dev, port 45258, debuggable)"
+    OUT_APK="$DIST_DIR/${BASE_PREFIX}${ARCH_SUFFIX}-dev.apk"
+    EDITION_LABEL="DEV EDITION (com.dsh.dev, port 45258, debuggable, arch=$TARGET_ARCH)"
 else
-    OUT_APK="$DIST_DIR/${BASE_PREFIX}${ABI_SUFFIX}.apk"
-    if [ -n "$ABI_SUFFIX" ]; then
-        EDITION_LABEL="RELEASE EDITION (com.dsh, port 45257, abi $DSH_ABI)"
-    else
-        EDITION_LABEL="UNIVERSAL RELEASE (com.dsh, port 45257, all ABIs)"
-    fi
+    OUT_APK="$DIST_DIR/${BASE_PREFIX}${ARCH_SUFFIX}.apk"
+    EDITION_LABEL="RELEASE EDITION (com.dsh, port 45257, arch=$TARGET_ARCH)"
 fi
 
 echo "============================================================"

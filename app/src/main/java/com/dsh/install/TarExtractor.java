@@ -1,7 +1,9 @@
 package com.dsh.install;
 
+import android.content.Context;
 import android.system.ErrnoException;
 import android.system.Os;
+import android.util.Log;
 
 import com.dsh.util.FileModeUtil;
 import com.dsh.util.PathSafety;
@@ -14,15 +16,29 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.zip.GZIPInputStream;
 
-/** Pure-Java tar fallback with path-checked regular files, directories and symlinks. */
+/** Path-checked streaming tar extractor with zstd/gzip support and inline chmod/symlinks. */
 public final class TarExtractor {
 
     private static final String TAG = "TarExtractor";
+    private static final String ZSTD_LIB_NAME = "libdsh_zstd.so";
 
     private TarExtractor() {
+    }
+
+    public static File findZstdBinary(Context context) {
+        if (context == null) {
+            return null;
+        }
+        String nativeDir = context.getApplicationInfo().nativeLibraryDir;
+        if (nativeDir == null || nativeDir.isEmpty()) {
+            return null;
+        }
+        File zstd = new File(nativeDir, ZSTD_LIB_NAME);
+        return (zstd.isFile() && zstd.canExecute()) ? zstd : null;
     }
 
     public static int untarGz(InputStream raw, File dest) throws IOException {
@@ -31,9 +47,63 @@ public final class TarExtractor {
         }
     }
 
+    public static int untarZst(Context context, InputStream raw, File dest) throws IOException {
+        File zstd = findZstdBinary(context);
+        if (zstd == null) {
+            throw new IOException("native zstd binary not available");
+        }
+        ProcessBuilder pb = new ProcessBuilder(zstd.getAbsolutePath(), "-d", "-c", "--no-progress");
+        pb.redirectError(ProcessBuilder.Redirect.PIPE);
+        Process proc = pb.start();
+        final IOException[] writerError = new IOException[1];
+        Thread feeder = new Thread(() -> {
+            try (OutputStream os = proc.getOutputStream()) {
+                byte[] buf = new byte[64 * 1024];
+                int n;
+                while ((n = raw.read(buf)) != -1) {
+                    os.write(buf, 0, n);
+                }
+                os.flush();
+            } catch (IOException e) {
+                writerError[0] = e;
+            }
+        }, "ZstdFeedThread");
+        feeder.start();
+
+        int links;
+        try (InputStream zstdOut = new BufferedInputStream(proc.getInputStream(), 1 << 16)) {
+            links = untar(zstdOut, dest);
+        } finally {
+            try {
+                feeder.join(10_000);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        if (writerError[0] != null) {
+            proc.destroyForcibly();
+            throw writerError[0];
+        }
+        try {
+            if (!proc.waitFor(30, TimeUnit.SECONDS)) {
+                proc.destroyForcibly();
+                throw new IOException("zstd process timed out");
+            }
+            if (proc.exitValue() != 0) {
+                throw new IOException("zstd exited with code " + proc.exitValue());
+            }
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            proc.destroyForcibly();
+            throw new IOException("interrupted waiting for zstd", ie);
+        }
+        return links;
+    }
+
     /** @return number of symlinks materialized from the archive. */
     public static int untar(InputStream in, File dest) throws IOException {
         byte[] header = new byte[512];
+        byte[] ioBuf = new byte[64 * 1024];
         String pendingName = null;
         String pendingLink = null;
         int links = 0;
@@ -55,11 +125,11 @@ public final class TarExtractor {
                 type = '0';
             }
             if (type == 'L') {
-                pendingName = new String(readEntry(in, size), StandardCharsets.UTF_8).trim();
+                pendingName = new String(readEntry(in, size, ioBuf), StandardCharsets.UTF_8).trim();
                 continue;
             }
             if (type == 'K') {
-                pendingLink = new String(readEntry(in, size), StandardCharsets.UTF_8).trim();
+                pendingLink = new String(readEntry(in, size, ioBuf), StandardCharsets.UTF_8).trim();
                 continue;
             }
             if (type == 'x' || type == 'g') {
@@ -70,7 +140,7 @@ public final class TarExtractor {
                 // 100-byte ustar field, which makes distinct files collide onto one
                 // directory name and breaks extraction with
                 // "cannot replace non-empty tar directory".
-                String pax = new String(readEntry(in, size), StandardCharsets.UTF_8);
+                String pax = new String(readEntry(in, size, ioBuf), StandardCharsets.UTF_8);
                 if (type == 'x') {
                     String paxPath = paxValue(pax, "path");
                     if (paxPath != null) {
@@ -102,14 +172,14 @@ public final class TarExtractor {
                 throw new IOException("unsafe tar entry path");
             }
             if (name.isEmpty()) {
-                skipEntry(in, size);
+                skipEntry(in, size, ioBuf);
                 continue;
             }
             File out = new File(dest, name);
             ensureParentInside(dest, out);
 
             if (type == '5') {
-                skipEntry(in, size);
+                skipEntry(in, size, ioBuf);
                 removeConflictingLeaf(out, true);
                 if (!out.isDirectory() && !out.mkdirs() && !out.isDirectory()) {
                     throw new IOException("cannot create dir " + out);
@@ -117,10 +187,26 @@ public final class TarExtractor {
                 FileModeUtil.applyMode(out, mode);
             } else if (type == '0') {
                 removeConflictingLeaf(out, false);
-                writeFile(in, out, size, dest);
+                writeFile(in, out, size, dest, ioBuf);
                 FileModeUtil.applyMode(out, mode);
+            } else if (type == '1') {
+                skipEntry(in, size, ioBuf);
+                String targetNorm = TarPath.normalize(link);
+                if (targetNorm == null || targetNorm.isEmpty()) {
+                    throw new IOException("unsafe hardlink target: " + link);
+                }
+                File targetFile = new File(dest, targetNorm);
+                if (!PathSafety.isInside(dest, targetFile)) {
+                    throw new IOException("hardlink escapes dest: " + targetNorm);
+                }
+                removeConflictingLeaf(out, false);
+                try {
+                    Os.link(targetFile.getAbsolutePath(), out.getAbsolutePath());
+                } catch (ErrnoException e) {
+                    throw new IOException("cannot create hardlink " + out + " -> " + targetFile, e);
+                }
             } else if (type == '2') {
-                skipEntry(in, size);
+                skipEntry(in, size, ioBuf);
                 validateLinkTarget(dest, out, link);
                 removeConflictingLeaf(out, false);
                 try {
@@ -130,7 +216,7 @@ public final class TarExtractor {
                 }
                 links++;
             } else {
-                skipEntry(in, size);
+                skipEntry(in, size, ioBuf);
                 throw new IOException("unsupported tar entry type " + (char) type + " at " + name);
             }
         }
@@ -272,34 +358,33 @@ public final class TarExtractor {
         }
     }
 
-    private static byte[] readEntry(InputStream in, long size) throws IOException {
+    private static byte[] readEntry(InputStream in, long size, byte[] buffer) throws IOException {
         if (size < 0 || size > (8L << 20)) {
             throw new IOException("unreasonable tar entry size: " + size);
         }
         ByteArrayOutputStream out = new ByteArrayOutputStream((int) size);
-        copy(in, out, size);
-        skipPadding(in, size);
+        copy(in, out, size, buffer);
+        skipPadding(in, size, buffer);
         return out.toByteArray();
     }
 
-    private static void skipEntry(InputStream in, long size) throws IOException {
-        skipExactly(in, size);
-        skipPadding(in, size);
+    private static void skipEntry(InputStream in, long size, byte[] buffer) throws IOException {
+        skipExactly(in, size, buffer);
+        skipPadding(in, size, buffer);
     }
 
-    private static void writeFile(InputStream in, File out, long size, File dest) throws IOException {
+    private static void writeFile(InputStream in, File out, long size, File dest, byte[] buffer) throws IOException {
         ensureParentInside(dest, out);
         try (OutputStream os = new FileOutputStream(out)) {
-            copy(in, os, size);
+            copy(in, os, size, buffer);
         }
-        skipPadding(in, size);
+        skipPadding(in, size, buffer);
     }
 
-    private static void copy(InputStream in, OutputStream out, long size) throws IOException {
+    private static void copy(InputStream in, OutputStream out, long size, byte[] buffer) throws IOException {
         if (size < 0) {
             throw new IOException("negative tar entry size: " + size);
         }
-        byte[] buffer = new byte[64 * 1024];
         long remaining = size;
         while (remaining > 0) {
             int read = in.read(buffer, 0, (int) Math.min(buffer.length, remaining));
@@ -311,12 +396,11 @@ public final class TarExtractor {
         }
     }
 
-    private static void skipExactly(InputStream in, long size) throws IOException {
+    private static void skipExactly(InputStream in, long size, byte[] buffer) throws IOException {
         if (size <= 0) {
             return;
         }
         long remaining = size;
-        byte[] buffer = new byte[8192];
         while (remaining > 0) {
             int read = in.read(buffer, 0, (int) Math.min(buffer.length, remaining));
             if (read < 0) {
@@ -326,8 +410,8 @@ public final class TarExtractor {
         }
     }
 
-    private static void skipPadding(InputStream in, long size) throws IOException {
+    private static void skipPadding(InputStream in, long size, byte[] buffer) throws IOException {
         long pad = (512 - (size % 512)) % 512;
-        skipExactly(in, pad);
+        skipExactly(in, pad, buffer);
     }
 }

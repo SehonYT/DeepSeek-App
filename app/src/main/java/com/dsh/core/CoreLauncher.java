@@ -3,10 +3,14 @@ package com.dsh.core;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 
+import com.dsh.install.BootStateStamp;
 import com.dsh.install.EnvInstaller;
+import com.dsh.runtime.CoreInstaller;
 import com.dsh.runtime.RuntimeManager;
+import com.dsh.runtime.ShellBridgeInstaller;
 import com.dsh.util.ProcessUtils;
 
 import java.io.File;
@@ -51,8 +55,10 @@ public final class CoreLauncher {
                     n = fis.read(buf);
                 }
                 if (n > 0) {
-                    String cmdline = new String(buf, 0, n);
-                    if (cmdline.contains("dsh") || (cmdline.contains("node") && cmdline.contains("cli"))) {
+                    String cmdline = new String(buf, 0, n).replace('\0', ' ');
+                    boolean isDshCore = (cmdline.contains("runtime/dsh") || cmdline.contains("apps/cli/lib/bin.js"))
+                            && cmdline.contains("--profile");
+                    if (isDshCore) {
                         Log.w(TAG, "Terminating orphan DeepSeek process (PID " + pid + ")");
                         android.os.Process.sendSignal(pid, android.os.Process.SIGNAL_KILL);
                         killedAny = true;
@@ -72,48 +78,58 @@ public final class CoreLauncher {
         // 1. Terminate any previous orphan instances
         killOrphanCoreProcesses();
 
-        // 2. Ensure the Bionic userspace is extracted so node & bash are available.
-        // A failure here must not abort the whole launch: the core is Node-based
-        // and lives in assets/runtime, so it can still start and the UI can show
-        // diagnostics. The background scheduler retries the env install.
-        if (!EnvInstaller.isInstalled(context)) {
-            Log.i(TAG, "First boot: installing Bionic userspace...");
-            try {
-                EnvInstaller.install(context);
-            } catch (Exception e) {
-                Log.e(TAG, "userspace install failed; continuing with runtime only: "
-                        + e.getMessage(), e);
-                com.dsh.core.CoreRuntimeState.lastError = "userspace install failed: "
-                        + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+        String envBundleId = EnvInstaller.readBundledBundleId(context);
+        String coreHash = CoreInstaller.getExpectedRuntimeHash(context);
+        File prefix = EnvInstaller.prefix(context);
+
+        long tCheck = SystemClock.elapsedRealtime();
+        boolean warmReady = BootStateStamp.isWarmReady(
+                context, prefix, runtime.getRuntimeDir(), runtime.getBinDir(),
+                envBundleId, coreHash, ShellBridgeInstaller.BRIDGE_FORMAT);
+
+        if (warmReady) {
+            BootMetrics.setColdInstall(false);
+            long checkMs = SystemClock.elapsedRealtime() - tCheck;
+            BootMetrics.setEnvCheckMs(checkMs);
+            BootMetrics.setCoreCheckMs(0);
+            Log.i(TAG, "warm-boot fast-path hit (" + checkMs + "ms); launching node directly");
+        } else {
+            BootMetrics.setColdInstall(true);
+            // 2. Ensure Termux bootstrap is extracted first so node & bash are available
+            long tEnv = SystemClock.elapsedRealtime();
+            if (!EnvInstaller.isInstalled(context)) {
+                Log.i(TAG, "First boot: installing Bionic userspace...");
+                try {
+                    EnvInstaller.install(context);
+                } catch (Exception e) {
+                    // A userspace failure must not abort the launch: the core still
+                    // runs from assets/runtime and the scheduler retries in background.
+                    Log.e(TAG, "userspace install failed; continuing with runtime only: "
+                            + e.getMessage(), e);
+                    CoreRuntimeState.lastError = "userspace install failed: "
+                            + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+                }
             }
+            BootMetrics.setEnvCheckMs(SystemClock.elapsedRealtime() - tEnv);
+
+            // 3. Extract DeepSeek runtime bundle & web UI
+            long tCore = SystemClock.elapsedRealtime();
+            runtime.installCore();
+            BootMetrics.setCoreCheckMs(SystemClock.elapsedRealtime() - tCore);
+
+            // Persist composite stamp so subsequent launches hit the <1ms warm-boot path
+            String installedEnvId = EnvInstaller.readInstalledBundleId(context);
+            BootStateStamp.write(context,
+                    !envBundleId.isEmpty() ? envBundleId : installedEnvId,
+                    coreHash,
+                    ShellBridgeInstaller.BRIDGE_FORMAT);
         }
 
-        // 3. Extract DeepSeek runtime bundle
-        runtime.installCore();
-
-        // 4. Background env sync & toolchain updates if any
-        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                runtime.installEnvInBackground();
-            }
-        }, 3500);
-
-        // 5. Launch DeepSeek process
+        // 4. Launch DeepSeek process immediately; CoreProcessSupervisor handles post-ready tasks.
         ProcessBuilder pb = new ProcessBuilder(runtime.coreCommand());
         pb.directory(filesDir);
-        File logsDir = new File(filesDir, "logs");
-        logsDir.mkdirs();
-        File stderrLog = new File(logsDir, "core_stderr.log");
-        if (stderrLog.exists()) {
-            stderrLog.delete();
-        }
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            pb.redirectError(ProcessBuilder.Redirect.to(stderrLog));
-        } else {
-            pb.redirectErrorStream(true);
-        }
         runtime.applyEnvironment(pb);
+        BootMetrics.markFork();
         Log.i(TAG, "Starting DeepSeek process: " + Arrays.toString(runtime.coreCommand()));
         return pb.start();
     }

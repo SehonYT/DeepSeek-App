@@ -3,7 +3,7 @@
 **Autonomous DeepSeek AI coding environment running natively on Android with Termux userspace.**
 
 [![Android](https://img.shields.io/badge/Android-7.0%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](https://android.com)
-[![Arch](https://img.shields.io/badge/ARM64-v8.0--A%2B-blue?style=flat-square)](https://arm.com)
+[![Arch](https://img.shields.io/badge/Arch-arm64--v8a%20%7C%20armeabi--v7a-blue?style=flat-square)](https://arm.com)
 [![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)](LICENSE)
 
 ---
@@ -27,4 +27,7 @@ All release APKs are automatically built and published via GitHub Actions.
 To trigger a build:
 1. Navigate to **Actions** -> **Build and Release DeepSeek APK**
 2. Click **Run workflow**
-3. Download `deepseek.apk` from the release artifacts.
+3. Download the APK matching your device:
+   - `deepseek.apk` — Universal (`arm64-v8a` + `armeabi-v7a`)
+   - `deepseek-arm64-v8a.apk` — 64-bit ARMv8-A+ split
+   - `deepseek-armeabi-v7a.apk` — 32-bit ARMv7-A split

@@ -20,6 +20,7 @@ import java.security.SecureRandom;
  */
 public final class AndroidBridge {
 
+    private final Context appContext;
     private final UiBridge ui = new UiBridge();
     private final ThemeBridge themeBridge;
     private final EngineBridge engine;
@@ -29,10 +30,10 @@ public final class AndroidBridge {
 
     public AndroidBridge(Context context, RuntimeManager runtime,
                          ShizukuBridge shizuku, ThemeManager theme) {
-        Context appContext = context.getApplicationContext();
+        this.appContext = context.getApplicationContext();
         this.themeBridge = new ThemeBridge(theme);
         this.engine = new EngineBridge(runtime);
-        this.config = new EngineConfigJson(appContext, runtime, engine, shizuku, themeBridge);
+        this.config = new EngineConfigJson(this.appContext, runtime, engine, shizuku, themeBridge);
     }
 
     /** Host activity, used to dismiss the native splash once the UI has painted. */
@@ -135,6 +136,63 @@ public final class AndroidBridge {
             com.dsh.ui.download.FileDownloader.handleBlobData(
                     act, base64Data, filename, mimeType);
         }
+    }
+
+    /** Checks clipboard MIME metadata without reading clip contents on non-image clips. */
+    @JavascriptInterface
+    public boolean hasClipboardImage(String token) {
+        if (!matchesNativeBridgeToken(token)) {
+            return false;
+        }
+        return com.dsh.ui.webview.ClipboardImageReader.hasClipboardImage(appContext);
+    }
+
+    /** Reads clipboard image off the UI thread and dispatches it into the WebView composer. */
+    @JavascriptInterface
+    public void requestClipboardImagePaste(String token) {
+        if (!matchesNativeBridgeToken(token)) {
+            return;
+        }
+        final MainActivity act = activityRef != null ? activityRef.get() : MainActivity.activeActivity;
+        if (act == null) {
+            return;
+        }
+        final android.webkit.WebView wv = act.getWebView();
+        if (wv == null) {
+            return;
+        }
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                com.dsh.ui.webview.ClipboardImageReader.ImageData img =
+                        com.dsh.ui.webview.ClipboardImageReader.readFromClipboard(appContext);
+                if (img != null && !img.base64.isEmpty()) {
+                    com.dsh.ui.webview.AgyWebView.dispatchImageToWebView(wv, img);
+                }
+            }
+        }, "DshClipboardImagePaste");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** Synchronous clipboard image fallback returning JSON. */
+    @JavascriptInterface
+    public String readClipboardImage(String token) {
+        if (!matchesNativeBridgeToken(token)) {
+            return "";
+        }
+        com.dsh.ui.webview.ClipboardImageReader.ImageData img =
+                com.dsh.ui.webview.ClipboardImageReader.readFromClipboard(appContext);
+        return img != null ? img.toJson().toString() : "";
+    }
+
+    /** Posts a clickable Android notification when an agent event completes while backgrounded. */
+    @JavascriptInterface
+    public void postAgentNotification(String token, String tag, String title, String message) {
+        if (!matchesNativeBridgeToken(token)) {
+            return;
+        }
+        com.dsh.gateway.handlers.NotificationHandler.postAgentAlert(appContext, tag, title, message);
     }
 
     private boolean matchesNativeBridgeToken(String candidate) {

@@ -17,13 +17,15 @@ public final class WebViewFactory {
     }
 
     public static WebView create(Context context, AndroidBridge bridge, ThemeManager theme) {
-        WebView view = new WebView(context);
+        WebView view = new AgyWebView(context);
         view.setBackgroundColor(theme.getBackgroundColor());
         view.setFocusable(true);
         view.setFocusableInTouchMode(true);
         view.requestFocus(View.FOCUS_DOWN);
-        // Hardware layer: hand compositing to the GPU (manifest enables HW accel).
-        view.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        // Do NOT set LAYER_TYPE_HARDWARE on WebView: Chromium internally handles
+        // its own hardware-accelerated compositor. Setting an Android View hardware
+        // layer forces an extra full-screen FBO texture blit at 120Hz.
+        view.setLayerType(View.LAYER_TYPE_NONE, null);
         view.addJavascriptInterface(bridge, "Android");
         // Android WebView needs an explicit focus grant for the soft keyboard to show.
         view.setOnTouchListener(new View.OnTouchListener() {

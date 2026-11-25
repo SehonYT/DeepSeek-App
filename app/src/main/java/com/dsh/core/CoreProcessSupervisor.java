@@ -28,20 +28,37 @@ public final class CoreProcessSupervisor {
     private final RuntimeManager runtime;
     private final OpenUrlWatcher openUrlWatcher;
     private final com.dsh.log.LogRingBuffer logBuffer;
+    private final Runnable readyListener;
     private final Runnable terminalListener;
 
     private volatile Process process;
     private volatile boolean stopping = false;
     private Thread worker;
+    private final Object readyLock = new Object();
+
+    private void notifyReadyLock() {
+        synchronized (readyLock) {
+            readyLock.notifyAll();
+        }
+    }
 
     public CoreProcessSupervisor(Context context, RuntimeManager runtime,
                                  OpenUrlWatcher openUrlWatcher,
                                  com.dsh.log.LogRingBuffer logBuffer,
                                  Runnable terminalListener) {
+        this(context, runtime, openUrlWatcher, logBuffer, null, terminalListener);
+    }
+
+    public CoreProcessSupervisor(Context context, RuntimeManager runtime,
+                                 OpenUrlWatcher openUrlWatcher,
+                                 com.dsh.log.LogRingBuffer logBuffer,
+                                 Runnable readyListener,
+                                 Runnable terminalListener) {
         this.appContext = context.getApplicationContext();
         this.runtime = runtime;
         this.openUrlWatcher = openUrlWatcher;
         this.logBuffer = logBuffer;
+        this.readyListener = readyListener;
         this.terminalListener = terminalListener;
     }
 
@@ -77,17 +94,25 @@ public final class CoreProcessSupervisor {
         int attempt = 0;
         while (!stopping) {
             Writer log = CoreLogWriter.open(appContext.getFilesDir());
+            Writer errLog = CoreLogWriter.open(appContext.getFilesDir(), "core_stderr.log", CoreLogWriter.STDERR_MAX_BYTES);
             try {
                 CoreRuntimeState.lastError = null;
                 CoreRuntimeState.restarting = false;
+                CoreRuntimeState.detectedWebUrl = null;
+                CoreRuntimeState.httpBoundSeen = false;
+                openUrlWatcher.setReadyNotifier(this::notifyReadyLock);
                 CoreLogWriter.writeLine(log, "\n=== DeepSeek Core Launch (attempt " + (attempt + 1) + ") ===");
                 Process proc = CoreLauncher.launch(runtime, appContext.getFilesDir());
                 process = proc;
 
                 final Writer streamWriter = log;
-                Thread streamer = new Thread(() -> streamLog(proc, streamWriter), "CoreStreamThread");
+                final Writer errWriter = errLog;
+                Thread streamer = new Thread(() -> streamOutput(proc, streamWriter), "CoreStreamThread");
+                Thread errStreamer = new Thread(() -> streamStderr(proc, errWriter), "CoreStderrThread");
                 streamer.setDaemon(true);
+                errStreamer.setDaemon(true);
                 streamer.start();
+                errStreamer.start();
 
                 if (!waitForReady(proc, log)) {
                     if (stopping) {
@@ -95,8 +120,11 @@ public final class CoreProcessSupervisor {
                     }
                     try {
                         streamer.join(1000);
+                        errStreamer.join(500);
                     } catch (InterruptedException ignored) {
                     }
+                    CoreLogWriter.closeQuietly(errLog);
+                    errLog = null;
                     int code = ProcessUtils.exitCode(proc);
                     if (CoreRuntimeState.lastError == null) {
                         CoreRuntimeState.lastError =
@@ -126,8 +154,19 @@ public final class CoreProcessSupervisor {
                     CoreLogWriter.writeLine(log, CoreRuntimeState.lastError);
                     com.dsh.log.CrashRecorder.recordCrash(appContext, code, 0, CoreRuntimeState.lastError, logBuffer);
                     CoreLogWriter.closeQuietly(log);
+                    log = null;
                     sleepInterruptible(delay);
                     continue;
+                }
+
+                // Trigger background env sync and daemon startup now that core is serving UI.
+                runtime.installEnvInBackground();
+                if (readyListener != null) {
+                    try {
+                        readyListener.run();
+                    } catch (Throwable t) {
+                        Log.w(TAG, "readyListener failed", t);
+                    }
                 }
 
                 long readyAt = System.currentTimeMillis();
@@ -141,14 +180,18 @@ public final class CoreProcessSupervisor {
                 }
                 try {
                     streamer.join(1000);
+                    errStreamer.join(500);
                 } catch (InterruptedException ignored) {
                 }
+                CoreLogWriter.closeQuietly(errLog);
+                errLog = null;
 
                 int code = ProcessUtils.exitCode(proc);
                 if (System.currentTimeMillis() - readyAt >= CoreRestartPolicy.SUSTAINED_READY_MS) {
                     attempt = 0;
                 }
                 CoreRuntimeState.serverUrl = null;
+                CoreRuntimeState.detectedWebUrl = null;
                 attempt++;
                 String exitDesc = describeExitCode(code, appContext.getFilesDir());
                 String tail = getLastLinesFromLog(appContext.getFilesDir(), 15);
@@ -183,6 +226,7 @@ public final class CoreProcessSupervisor {
                 // install/launch failure: fail-closed, user retries from the splash.
                 break;
             } finally {
+                CoreLogWriter.closeQuietly(errLog);
                 CoreLogWriter.closeQuietly(log);
             }
         }
@@ -190,7 +234,7 @@ public final class CoreProcessSupervisor {
 
     private boolean waitForReady(Process proc, Writer log) {
         long start = System.currentTimeMillis();
-        String csrf = runtime.getCsrfToken();
+        long tcpOpenAt = -1L;
         int port = CoreRuntimeState.httpsPort;
         while (System.currentTimeMillis() - start < CoreReadyProbe.READY_TIMEOUT_MS) {
             if (stopping) {
@@ -198,28 +242,57 @@ public final class CoreProcessSupervisor {
             }
             if (!ProcessUtils.isAlive(proc)) {
                 int code = ProcessUtils.exitCode(proc);
-                ProcessUtils.sleep(200);
+                ProcessUtils.sleep(100);
                 String lastLogs = getLastLinesFromLog(appContext.getFilesDir(), 10);
                 CoreRuntimeState.lastError = "core process exited before it became ready (exit code " + code + ")"
                         + (lastLogs.isEmpty() ? "" : "\n--- core.log tail ---\n" + lastLogs);
                 CoreLogWriter.writeLine(log, CoreRuntimeState.lastError);
                 return false;
             }
-            if (CoreReadyProbe.probeOnce(appContext, port)) {
-                CoreRuntimeState.serverUrl = CoreUrl.startUrl(port, csrf);
-                CoreRuntimeState.lastError = null;
-                CoreRuntimeState.restarting = false;
-                CoreRuntimeState.readyGeneration++;
-                String readyStatus = "core ready on 127.0.0.1:" + port;
-                Log.i(TAG, readyStatus);
-                CoreLogWriter.writeLine(log, readyStatus);
-                return true;
+            String detected = CoreRuntimeState.detectedWebUrl;
+            if (tcpOpenAt < 0 && (CoreRuntimeState.httpBoundSeen || detected != null || CoreReadyProbe.probeOnce(appContext, port))) {
+                tcpOpenAt = System.currentTimeMillis();
+                detected = CoreRuntimeState.detectedWebUrl;
+            }
+            if (tcpOpenAt >= 0) {
+                if (detected != null && !detected.isEmpty()) {
+                    CoreRuntimeState.serverUrl = detected;
+                    CoreRuntimeState.lastError = null;
+                    CoreRuntimeState.restarting = false;
+                    CoreRuntimeState.readyGeneration++;
+                    BootMetrics.markCoreReady();
+                    String readyStatus = "core ready on 127.0.0.1:" + port + " (tokenized URL)";
+                    Log.i(TAG, readyStatus);
+                    CoreLogWriter.writeLine(log, readyStatus);
+                    return true;
+                }
+                if (System.currentTimeMillis() - tcpOpenAt >= 500L) {
+                    CoreRuntimeState.serverUrl = CoreUrl.startUrl(port);
+                    CoreRuntimeState.lastError = null;
+                    CoreRuntimeState.restarting = false;
+                    CoreRuntimeState.readyGeneration++;
+                    BootMetrics.markCoreReady();
+                    String readyStatus = "core ready on 127.0.0.1:" + port + " (fallback URL)";
+                    Log.i(TAG, readyStatus);
+                    CoreLogWriter.writeLine(log, readyStatus);
+                    return true;
+                }
+            }
+            synchronized (readyLock) {
+                if (!stopping && CoreRuntimeState.detectedWebUrl == null && ProcessUtils.isAlive(proc)) {
+                    try {
+                        readyLock.wait(tcpOpenAt >= 0 ? 50L : 80L);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return false;
+                    }
+                }
             }
         }
         return false;
     }
 
-    private void streamLog(Process proc, Writer log) {
+    private void streamOutput(Process proc, Writer log) {
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(proc.getInputStream()))) {
             String line;
@@ -234,6 +307,25 @@ public final class CoreProcessSupervisor {
             }
         } catch (Exception e) {
             Log.w(TAG, "log stream ended", e);
+        } finally {
+            notifyReadyLock();
+        }
+    }
+
+    private void streamStderr(Process proc, Writer errLog) {
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(proc.getErrorStream()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String safeLine = SensitiveDataRedactor.redactLine(line);
+                Log.w(TAG, "[stderr] " + safeLine);
+                if (logBuffer != null) {
+                    logBuffer.append("core", "WARN", "[stderr] " + safeLine);
+                }
+                CoreLogWriter.writeLine(errLog, safeLine);
+            }
+        } catch (Exception e) {
+            Log.d(TAG, "stderr stream ended", e);
         }
     }
 

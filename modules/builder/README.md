@@ -137,11 +137,15 @@ flowchart TD
 ## 5. Использование
 
 ```bash
-# Стандартная сборка релизного APK (dist/antigravity.apk, порт 45157):
-bash modules/builder/build_apk.sh
+# Универсальный релизный APK (arm64-v8a + armeabi-v7a, dist/deepseek.apk):
+bash build.sh
 
-# Сборка релизной версии с обходом проверок (dist/antigravity-region-bypass.apk, порт 45157):
-bash modules/builder/build_apk.sh --region-bypass
+# Сплит-сборки под конкретную архитектуру:
+bash build.sh --arch arm64-v8a      # dist/deepseek-arm64-v8a.apk
+bash build.sh --arch armeabi-v7a    # dist/deepseek-armeabi-v7a.apk
+
+# Dev-сборка:
+bash build.sh --dev
 
 # Запуск тестов модуля builder:
 bash modules/builder/tests/run_all.sh
