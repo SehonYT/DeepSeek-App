@@ -29,8 +29,14 @@ normalize_arch() {
         armeabi-v7a|armeabi|arm|v7a|7a)
             echo "armeabi-v7a"
             ;;
+        x86|i686|i386)
+            echo "x86"
+            ;;
+        x86_64|x64|amd64)
+            echo "x86_64"
+            ;;
         *)
-            echo "[ERROR] Unsupported --arch '$1'. Expected: universal, arm64-v8a, or armeabi-v7a." >&2
+            echo "[ERROR] Unsupported --arch '$1'. Expected: universal, arm64-v8a, armeabi-v7a, x86, or x86_64." >&2
             exit 1
             ;;
     esac
@@ -48,7 +54,7 @@ while [ $# -gt 0 ]; do
             ;;
         --arch|--abi)
             if [ $# -lt 2 ]; then
-                echo "[ERROR] $1 requires a value (universal, arm64-v8a, armeabi-v7a)." >&2
+                echo "[ERROR] $1 requires a value (universal, arm64-v8a, armeabi-v7a, x86, x86_64)." >&2
                 exit 1
             fi
             TARGET_ARCH="$(normalize_arch "$2")"

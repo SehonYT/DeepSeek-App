@@ -62,6 +62,9 @@ def has_zstd_jni(target_arch: str) -> bool:
         return os.path.isfile(os.path.join(jni_dir, "arm64-v8a", "libdsh_zstd.so"))
     if arch == "armeabi-v7a":
         return os.path.isfile(os.path.join(jni_dir, "armeabi-v7a", "libdsh_zstd.so"))
+    if arch in ("x86", "x86_64"):
+        # No vendored zstd for Intel ABIs: those bundles ship gzip archives.
+        return False
     return (
         os.path.isfile(os.path.join(jni_dir, "arm64-v8a", "libdsh_zstd.so"))
         and os.path.isfile(os.path.join(jni_dir, "armeabi-v7a", "libdsh_zstd.so"))
