@@ -35,6 +35,7 @@ public final class TarExtractor {
     public static int untar(InputStream in, File dest) throws IOException {
         byte[] header = new byte[512];
         String pendingName = null;
+        String pendingLink = null;
         int links = 0;
         while (TarHeader.readBlock(in, header)) {
             if (TarHeader.isZeroBlock(header)) {
@@ -45,6 +46,10 @@ public final class TarExtractor {
             long size = TarHeader.readOctal(header, 124, 12);
             int type = header[156] & 0xff;
             String link = TarHeader.readField(header, 157, 100);
+            if (pendingLink != null) {
+                link = pendingLink;
+                pendingLink = null;
+            }
             String dirPrefix = TarHeader.readField(header, 345, 155);
             if (type == 0) {
                 type = '0';
@@ -53,15 +58,43 @@ public final class TarExtractor {
                 pendingName = new String(readEntry(in, size), StandardCharsets.UTF_8).trim();
                 continue;
             }
-            if (type == 'K' || type == 'x' || type == 'g') {
-                skipEntry(in, size);
+            if (type == 'K') {
+                pendingLink = new String(readEntry(in, size), StandardCharsets.UTF_8).trim();
                 continue;
             }
+            if (type == 'x' || type == 'g') {
+                // PAX extended header. GNU tar emits one for EVERY entry (it stores
+                // mtime with sub-second precision), and long paths (>100 bytes,
+                // or >155 for the ustar prefix) are stored ONLY here as "path=".
+                // Skipping these silently truncates every long member name to the
+                // 100-byte ustar field, which makes distinct files collide onto one
+                // directory name and breaks extraction with
+                // "cannot replace non-empty tar directory".
+                String pax = new String(readEntry(in, size), StandardCharsets.UTF_8);
+                if (type == 'x') {
+                    String paxPath = paxValue(pax, "path");
+                    if (paxPath != null) {
+                        pendingName = paxPath;
+                    }
+                    String paxLink = paxValue(pax, "linkpath");
+                    if (paxLink != null) {
+                        pendingLink = paxLink;
+                    }
+                }
+                continue;
+            }
+            boolean nameIsComplete = false;
             if (pendingName != null) {
                 name = pendingName;
                 pendingName = null;
+                // Both a PAX path= value and a GNU 'L' long name carry the complete
+                // member path already.
+                nameIsComplete = true;
             }
-            if (dirPrefix != null && !dirPrefix.isEmpty()) {
+            // The ustar "prefix" field only applies to the truncated 100-byte
+            // header name. Prepending it to an already-complete long name would
+            // corrupt the path.
+            if (!nameIsComplete && dirPrefix != null && !dirPrefix.isEmpty()) {
                 name = dirPrefix + "/" + name;
             }
             name = TarPath.normalize(name);
@@ -102,6 +135,52 @@ public final class TarExtractor {
             }
         }
         return links;
+    }
+
+    /**
+     * Reads one key from a PAX extended header payload.
+     *
+     * PAX records are "LEN key=value" records terminated by a newline, where LEN
+     * counts the whole record including the length digits, the space and the
+     * newline. Values are UTF-8 and may contain "=", so split on the first "="
+     * that follows the length + space prefix instead of on the first "=" in the
+     * line.
+     */
+    private static String paxValue(String payload, String key) {
+        if (payload == null || payload.isEmpty()) {
+            return null;
+        }
+        String wanted = key + "=";
+        int pos = 0;
+        int len = payload.length();
+        while (pos < len) {
+            int space = payload.indexOf(' ', pos);
+            if (space < 0) {
+                break;
+            }
+            int recordLen;
+            try {
+                recordLen = Integer.parseInt(payload.substring(pos, space).trim());
+            } catch (NumberFormatException e) {
+                return null;
+            }
+            if (recordLen <= 0 || pos + recordLen > len) {
+                return null;
+            }
+            int keyStart = space + 1;
+            if (payload.startsWith(wanted, keyStart)) {
+                int valueStart = keyStart + wanted.length();
+                int valueEnd = pos + recordLen;
+                while (valueEnd > valueStart
+                        && (payload.charAt(valueEnd - 1) == 0x0a
+                            || payload.charAt(valueEnd - 1) == 0x0d)) {
+                    valueEnd--;
+                }
+                return payload.substring(valueStart, valueEnd);
+            }
+            pos += recordLen;
+        }
+        return null;
     }
 
     private static void validateLinkTarget(File dest, File linkFile, String target) throws IOException {
@@ -147,13 +226,49 @@ public final class TarExtractor {
             if (allowDirectory) {
                 return;
             }
-            if (!out.delete()) {
-                throw new IOException("cannot replace non-empty tar directory " + out);
-            }
+            // A file/symlink entry collided with an existing directory. This can
+            // happen when an archive is extracted twice, or when two members share
+            // a name. Recurse so a populated directory is replaced instead of
+            // failing the whole install with a dead end: the stage directory is
+            // disposable, and the archive entry we are about to write wins.
+            deleteRecursively(out);
             return;
         }
         if (!out.delete()) {
             throw new IOException("cannot replace tar file " + out);
+        }
+    }
+
+    /** Deletes a path and anything beneath it (symlinks are unlinked, not followed). */
+    private static void deleteRecursively(File target) throws IOException {
+        if (target == null || !target.exists()) {
+            if (target != null && TextFileDetector.isSymlink(target)) {
+                try {
+                    Os.remove(target.getAbsolutePath());
+                } catch (ErrnoException e) {
+                    throw new IOException("cannot remove " + target, e);
+                }
+            }
+            return;
+        }
+        if (TextFileDetector.isSymlink(target)) {
+            try {
+                Os.remove(target.getAbsolutePath());
+            } catch (ErrnoException e) {
+                throw new IOException("cannot remove symlink " + target, e);
+            }
+            return;
+        }
+        if (target.isDirectory()) {
+            File[] children = target.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    deleteRecursively(child);
+                }
+            }
+        }
+        if (!target.delete() && target.exists()) {
+            throw new IOException("cannot remove " + target);
         }
     }
 

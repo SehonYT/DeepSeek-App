@@ -72,10 +72,20 @@ public final class CoreLauncher {
         // 1. Terminate any previous orphan instances
         killOrphanCoreProcesses();
 
-        // 2. Ensure Termux bootstrap is extracted first so node & bash are available
+        // 2. Ensure the Bionic userspace is extracted so node & bash are available.
+        // A failure here must not abort the whole launch: the core is Node-based
+        // and lives in assets/runtime, so it can still start and the UI can show
+        // diagnostics. The background scheduler retries the env install.
         if (!EnvInstaller.isInstalled(context)) {
-            Log.i(TAG, "First boot: installing Termux bootstrap environment...");
-            EnvInstaller.install(context);
+            Log.i(TAG, "First boot: installing Bionic userspace...");
+            try {
+                EnvInstaller.install(context);
+            } catch (Exception e) {
+                Log.e(TAG, "userspace install failed; continuing with runtime only: "
+                        + e.getMessage(), e);
+                com.dsh.core.CoreRuntimeState.lastError = "userspace install failed: "
+                        + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            }
         }
 
         // 3. Extract DeepSeek runtime bundle

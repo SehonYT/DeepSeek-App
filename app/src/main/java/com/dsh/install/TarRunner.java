@@ -24,6 +24,32 @@ public final class TarRunner {
         return runTar(EnvPaths.TAR, false, archive, prefix, gzip);
     }
 
+    /**
+     * True when tar produced a usable prefix despite a non-zero exit.
+     *
+     * Android's toybox/system tar report failure for chown errors that are
+     * unavoidable for an unprivileged app, so the exit code alone is not a
+     * reliable signal. Check for the entries every bootstrap/runtime must have.
+     */
+    private static boolean looksExtracted(File prefix) {
+        File bin = new File(prefix, "bin");
+        if (new File(bin, "bash").isFile()) {
+            return true;
+        }
+        // Runtime bundles have no bin/bash; accept any substantially populated tree.
+        File[] top = prefix.listFiles();
+        if (top == null || top.length <= 8) {
+            return false;
+        }
+        // A partially extracted bootstrap is the dangerous case: it has some
+        // entries but is missing the shells. Require at least one executable
+        // entry point so a truncated extraction is never accepted.
+        return new File(prefix, "bin/sh").exists()
+                || new File(prefix, "bin/pkg").exists()
+                || new File(prefix, "apps").isDirectory()
+                || new File(prefix, "node_modules").isDirectory();
+    }
+
     private static boolean runTar(String exe, boolean viaToybox, File archive, File prefix,
                                   boolean gzip) {
         if (!new File(exe).isFile()) {
@@ -49,6 +75,16 @@ public final class TarRunner {
             }
             int rc = p.exitValue();
             if (rc != 0) {
+                // Non-root Android cannot chown, so both toybox and system tar exit
+                // non-zero ("chown ... Operation not permitted") even though the
+                // extraction itself is complete. Treating that as failure pushed the
+                // installer onto the much slower Java fallback (and, before PAX
+                // support, onto a broken one). Accept the archive if it actually
+                // produced the expected tree.
+                if (looksExtracted(prefix)) {
+                    Log.i(TAG, "tar exit " + rc + " but tree is populated; accepting: " + cmd);
+                    return true;
+                }
                 Log.w(TAG, "tar exit " + rc + ": " + cmd);
             }
             return rc == 0;

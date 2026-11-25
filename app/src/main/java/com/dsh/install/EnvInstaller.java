@@ -127,8 +127,13 @@ public final class EnvInstaller {
         if (!basic) {
             return false;
         }
-        if (is32BitUserspace() && !bashSmokeTest(context, prefix)) {
-            Log.w(TAG, "installed prefix bash failed smoke test on 32-bit userspace; forcing reinstall with ARM bootstrap");
+        // Verify the prefix can actually execute on EVERY ABI, not only 32-bit.
+        // A prefix left half-written by an interrupted extraction (or built for a
+        // different ABI by an older build) satisfies the file checks above but
+        // cannot run, and previously stayed "installed" forever because nothing
+        // re-tested it.
+        if (!bashSmokeTest(context, prefix)) {
+            Log.w(TAG, "installed prefix bash failed its smoke test; a reinstall is required");
             return false;
         }
         return true;
@@ -150,14 +155,13 @@ public final class EnvInstaller {
         EnvBundleManifest manifest = EnvBundleManifest.load(assets);
         String bootstrapAsset = bootstrapAssetForArch(assets);
         if (bootstrapAsset == null) {
-            // The exact ABI is not bundled: fall back to the generic chain so we
-            // fail with the actionable bootstrap/smoke-test error instead of an
-            // opaque "asset missing".
-            bootstrapAsset = AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP,
-                    EnvPaths.ASSET_BOOTSTRAP_PLAIN);
-        }
-        if (bootstrapAsset == null) {
-            throw new IllegalStateException("required asset missing: " + EnvPaths.ASSET_BOOTSTRAP);
+            // No userspace for this device ABI. Per-ABI split APKs only bundle the
+            // matching tarball, so this means the user installed the wrong split
+            // (or an ABI we do not build). Falling back to the aarch64 bootstrap
+            // would guarantee an exec failure; report the real cause instead.
+            throw new IllegalStateException("this build does not include a userspace for "
+                    + primaryAbi() + " (device ABI); install the matching APK split or the"
+                    + " universal build");
         }
         Log.i(TAG, "device ABI=" + primaryAbi() + " arch=" + deviceArch()
                 + " bootstrap=" + bootstrapAsset);

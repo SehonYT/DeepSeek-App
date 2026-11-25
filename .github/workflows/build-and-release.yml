@@ -186,9 +186,58 @@ jobs:
           fi
           cat config/app.env
 
-      - name: Build DeepSeek Release APK (dist/deepseek.apk)
+      - name: Build Universal APK (all ABIs, one file installs anywhere)
         run: |
           bash build.sh
+
+      - name: Build Per-ABI APKs (smaller downloads)
+        run: |
+          # Each split ships only the userspace its devices can execute:
+          # arm64 ~136MB, arm32 ~118MB, x86 ~136MB, x86_64 ~135MB
+          # versus ~349MB for the universal build.
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            echo "[CI] Building split APK for $abi"
+            bash build.sh --abi "$abi"
+          done
+          ls -lh dist/
+
+      - name: Validate APK Set (ABIs, signing, version)
+        run: |
+          python3 - <<'PY'
+          import glob, os, re, subprocess, sys, zipfile
+          expected = {
+              'dist/deepseek.apk': set(),  # universal: checked below
+              'dist/deepseek-arm64-v8a.apk': {'assets/env/bootstrap/bootstrap.tar.gz'},
+              'dist/deepseek-armeabi-v7a.apk': {'assets/env/bootstrap/bootstrap-arm.tar.gz'},
+              'dist/deepseek-x86.apk': {'assets/env/bootstrap/bootstrap-x86.tar.gz'},
+              'dist/deepseek-x86_64.apk': {'assets/env/bootstrap/bootstrap-x86_64.tar.gz'},
+          }
+          all_bootstraps = {
+              'assets/env/bootstrap/bootstrap.tar.gz',
+              'assets/env/bootstrap/bootstrap-arm.tar.gz',
+              'assets/env/bootstrap/bootstrap-x86.tar.gz',
+              'assets/env/bootstrap/bootstrap-x86_64.tar.gz',
+          }
+          failures = []
+          for apk, want in expected.items():
+              if not os.path.isfile(apk):
+                  failures.append(f'{apk}: not produced'); continue
+              with zipfile.ZipFile(apk) as z:
+                  names = set(z.namelist())
+                  vers = z.read('assets/env/manifest.json') if 'assets/env/manifest.json' in names else b''
+              got = {n for n in names if n.startswith('assets/env/bootstrap/bootstrap') and n.endswith('.tar.gz')}
+              if not want:
+                  want = all_bootstraps
+              if got != want:
+                  failures.append(f'{apk}: bootstraps {sorted(got)} != {sorted(want)}')
+              # every pty ABI needed by the shipped userspaces must be present
+              pty = {n for n in names if 'node-pty/prebuilds/' in n and n.endswith('pty.node')}
+              print(f'[CI] {apk}: {len(got)} userspace(s), {len(pty)} pty prebuild(s), {os.path.getsize(apk)//(1024*1024)} MB')
+          if failures:
+              for f in failures: print('::error::' + f)
+              sys.exit(1)
+          print('[CI] APK set validated')
+          PY
 
       - name: Build DeepSeek Dev APK (dist/deepseek-dev.apk)
         run: |
@@ -197,7 +246,7 @@ jobs:
       - name: Compute Cryptographic Checksums
         run: |
           cd dist
-          sha256sum deepseek.apk deepseek-dev.apk > SHA256SUMS.txt
+          sha256sum *.apk > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Upload Build Artifacts
@@ -205,8 +254,7 @@ jobs:
         with:
           name: deepseek-binaries
           path: |
-            dist/deepseek.apk
-            dist/deepseek-dev.apk
+            dist/*.apk
             dist/SHA256SUMS.txt
 
       - name: Publish GitHub Release
@@ -220,6 +268,10 @@ jobs:
           make_latest: true
           files: |
             dist/deepseek.apk
+            dist/deepseek-arm64-v8a.apk
+            dist/deepseek-armeabi-v7a.apk
+            dist/deepseek-x86.apk
+            dist/deepseek-x86_64.apk
             dist/deepseek-dev.apk
             dist/SHA256SUMS.txt
           body: |

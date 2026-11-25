@@ -16,6 +16,7 @@ export FAST_BUILD=0
 export DEV_MODE=0
 export CUSTOM_PREFIX=""
 export CUSTOM_OUT=""
+export DSH_ABI=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -35,6 +36,13 @@ while [ $# -gt 0 ]; do
             export CUSTOM_OUT="$2"
             shift 2
             ;;
+        --abi)
+            # Build a single-ABI APK that ships only one userspace (smaller
+            # download). "universal" keeps every ABI so one file installs
+            # on any device.
+            export DSH_ABI="$2"
+            shift 2
+            ;;
         *)
             shift
             ;;
@@ -42,16 +50,24 @@ while [ $# -gt 0 ]; do
 done
 
 BASE_PREFIX="${CUSTOM_PREFIX:-deepseek}"
+ABI_SUFFIX=""
+if [ -n "$DSH_ABI" ] && [ "$DSH_ABI" != "universal" ]; then
+    ABI_SUFFIX="-$DSH_ABI"
+fi
 
 if [ -n "$CUSTOM_OUT" ]; then
     OUT_APK="$CUSTOM_OUT"
     EDITION_LABEL="CUSTOM OUTPUT ($OUT_APK)"
 elif [ "$DEV_MODE" = "1" ]; then
-    OUT_APK="$DIST_DIR/${BASE_PREFIX}-dev.apk"
+    OUT_APK="$DIST_DIR/${BASE_PREFIX}-dev${ABI_SUFFIX}.apk"
     EDITION_LABEL="DEV EDITION (com.dsh.dev, port 45258, debuggable)"
 else
-    OUT_APK="$DIST_DIR/${BASE_PREFIX}.apk"
-    EDITION_LABEL="RELEASE EDITION (com.dsh, port 45257)"
+    OUT_APK="$DIST_DIR/${BASE_PREFIX}${ABI_SUFFIX}.apk"
+    if [ -n "$ABI_SUFFIX" ]; then
+        EDITION_LABEL="RELEASE EDITION (com.dsh, port 45257, abi $DSH_ABI)"
+    else
+        EDITION_LABEL="UNIVERSAL RELEASE (com.dsh, port 45257, all ABIs)"
+    fi
 fi
 
 echo "============================================================"
