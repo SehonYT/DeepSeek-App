@@ -28,14 +28,93 @@ public final class EnvInstaller {
         return EnvPaths.prefix(context);
     }
 
-    public static boolean is32BitUserspace() {
+    /** The ABI family the bundled userspace must match for this device. */
+    public enum Arch {
+        ARM64,
+        ARM32,
+        X86,
+        X86_64
+    }
+
+    /**
+     * Resolves the primary ABI the app process actually runs under. This is the
+     * authoritative signal: Build.SUPPORTED_ABIS[0] is the ABI Android picked for
+     * this APK, so a 128-bit-silicon phone with a 32-bit userspace reports arm32.
+     */
+    public static Arch deviceArch() {
+        String abi = primaryAbi();
+        if (abi == null) {
+            // Very old API levels: fall back to os.arch.
+            String arch = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.US);
+            if (arch.contains("aarch64") || arch.contains("arm64")) {
+                return Arch.ARM64;
+            }
+            if (arch.contains("arm")) {
+                return Arch.ARM32;
+            }
+            if (arch.contains("x86_64") || arch.contains("amd64")) {
+                return Arch.X86_64;
+            }
+            return Arch.X86;
+        }
+        if (abi.startsWith("arm64")) {
+            return Arch.ARM64;
+        }
+        if (abi.startsWith("armeabi") || abi.startsWith("arm")) {
+            return Arch.ARM32;
+        }
+        if (abi.startsWith("x86_64")) {
+            return Arch.X86_64;
+        }
+        return Arch.X86;
+    }
+
+    /** The ABI Android selected for this process (null on pre-Lollipop). */
+    public static String primaryAbi() {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
-            String[] abis64 = android.os.Build.SUPPORTED_64_BIT_ABIS;
-            if (abis64 == null || abis64.length == 0) {
-                return true;
+            String[] abis = android.os.Build.SUPPORTED_ABIS;
+            if (abis != null && abis.length > 0) {
+                return abis[0];
             }
         }
-        return !new File("/system/bin/linker64").exists();
+        return null;
+    }
+
+    /**
+     * True when this device runs a 32-bit Android userspace, which cannot load
+     * 64-bit ELFs even on 64-bit silicon (e.g. armv8l kernels that expose only
+     * the arm32 ABI to apps). Such devices need the 32-bit bootstrap and the
+     * matching 32-bit native node-pty prebuild.
+     */
+    public static boolean is32BitUserspace() {
+        Arch arch = deviceArch();
+        return arch == Arch.ARM32 || arch == Arch.X86;
+    }
+
+    /** The bundled bootstrap asset that matches this device ABI, if any. */
+    private static String bootstrapAssetForArch(android.content.res.AssetManager assets) {
+        String candidate;
+        switch (deviceArch()) {
+            case ARM64:
+                candidate = EnvPaths.ASSET_BOOTSTRAP;
+                break;
+            case ARM32:
+                candidate = EnvPaths.ASSET_BOOTSTRAP_ARM;
+                break;
+            case X86_64:
+                candidate = EnvPaths.ASSET_BOOTSTRAP_X64;
+                break;
+            case X86:
+            default:
+                candidate = EnvPaths.ASSET_BOOTSTRAP_X86;
+                break;
+        }
+        String picked = AssetPicker.pick(assets, candidate);
+        if (picked == null) {
+            Log.w(TAG, "no bootstrap bundled for ABI " + primaryAbi()
+                    + " (wanted " + candidate + "); falling back to aarch64/arm assets");
+        }
+        return picked;
     }
 
     public static boolean isInstalled(Context context) {
@@ -43,7 +122,8 @@ public final class EnvInstaller {
         boolean basic = new File(prefix, EnvPaths.MARKER).isFile()
                 && new File(prefix, EnvPaths.BASH_REL).isFile()
                 && new File(prefix, "bin/node").isFile()
-                && new File(prefix, "lib/libsqlite3.so").exists();
+                && new File(prefix, "lib/libtermux-exec.so").exists()
+                && hasLibrary(new File(prefix, "lib"), "libsqlite3.so");
         if (!basic) {
             return false;
         }
@@ -68,19 +148,19 @@ public final class EnvInstaller {
         validatePrefixLocation(ctx, prefix);
 
         EnvBundleManifest manifest = EnvBundleManifest.load(assets);
-        String bootstrapAsset = null;
-        if (is32BitUserspace()) {
-            bootstrapAsset = AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP_ARM);
-            if (bootstrapAsset != null) {
-                Log.i(TAG, "32-bit Android userspace detected without linker64; using 32-bit ARM bootstrap: " + bootstrapAsset);
-            }
-        }
+        String bootstrapAsset = bootstrapAssetForArch(assets);
         if (bootstrapAsset == null) {
-            bootstrapAsset = AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP, EnvPaths.ASSET_BOOTSTRAP_PLAIN);
+            // The exact ABI is not bundled: fall back to the generic chain so we
+            // fail with the actionable bootstrap/smoke-test error instead of an
+            // opaque "asset missing".
+            bootstrapAsset = AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP,
+                    EnvPaths.ASSET_BOOTSTRAP_PLAIN);
         }
         if (bootstrapAsset == null) {
             throw new IllegalStateException("required asset missing: " + EnvPaths.ASSET_BOOTSTRAP);
         }
+        Log.i(TAG, "device ABI=" + primaryAbi() + " arch=" + deviceArch()
+                + " bootstrap=" + bootstrapAsset);
         if (isInstalled(ctx)) {
             updateManagedLayers(ctx, assets, prefix, bootstrapAsset, manifest);
             return false;
@@ -117,11 +197,27 @@ public final class EnvInstaller {
                 throw new IOException("cannot create staging prefix: " + stage);
             }
             String targetPrefix = prefix.getAbsolutePath();
-            boolean isArm = EnvPaths.ASSET_BOOTSTRAP_ARM.equals(bootstrapAsset);
-            String expectedSha = (isArm && manifest.bootstrapArmSha256 != null)
-                    ? manifest.bootstrapArmSha256 : manifest.bootstrapSha256;
-            int expectedSymlinks = (isArm && manifest.bootstrapArmSymlinkCount > 0)
-                    ? manifest.bootstrapArmSymlinkCount : manifest.bootstrapSymlinkCount;
+            // Pick the manifest entry that describes the bootstrap actually used.
+            // Each bundled ABI is inside the signed manifest, so a swapped or
+            // truncated archive still fails closed.
+            String expectedSha = manifest.bootstrapSha256;
+            int expectedSymlinks = manifest.bootstrapSymlinkCount;
+            if (EnvPaths.ASSET_BOOTSTRAP_ARM.equals(bootstrapAsset)) {
+                if (manifest.bootstrapArmSha256 != null) {
+                    expectedSha = manifest.bootstrapArmSha256;
+                    expectedSymlinks = manifest.bootstrapArmSymlinkCount;
+                }
+            } else if (EnvPaths.ASSET_BOOTSTRAP_X86.equals(bootstrapAsset)) {
+                if (manifest.bootstrapX86Sha256 != null) {
+                    expectedSha = manifest.bootstrapX86Sha256;
+                    expectedSymlinks = manifest.bootstrapX86SymlinkCount;
+                }
+            } else if (EnvPaths.ASSET_BOOTSTRAP_X64.equals(bootstrapAsset)) {
+                if (manifest.bootstrapX64Sha256 != null) {
+                    expectedSha = manifest.bootstrapX64Sha256;
+                    expectedSymlinks = manifest.bootstrapX64SymlinkCount;
+                }
+            }
             BootstrapExtractor.extract(assets, bootstrapAsset, stage,
                     expectedSha, expectedSymlinks);
             OverlayCopier.overlay(assets, EnvPaths.ASSET_OVERLAY, stage);
@@ -250,7 +346,10 @@ public final class EnvInstaller {
         requireFile(new File(bin, "sh"), "sh");
         requireFile(new File(bin, "pkg"), "pkg wrapper");
         requireFile(new File(bin, "node"), "node");
-        requireFile(new File(prefix, "lib/libsqlite3.so"), "libsqlite3.so");
+        // The 32-bit ARM bundle resolves libsqlite3 to a versioned soname
+        // (libsqlite3.so.3.54.1) instead of the unversioned symlink, so accept
+        // either form when validating the tree.
+        requireAny(new File(prefix, "lib"), "libsqlite3.so", "libsqlite3.so");
         requireFile(new File(prefix, "lib/libtermux-exec.so"), "libtermux-exec.so");
         if (minimumSymlinks > 0) {
             int actual = countSymlinks(prefix);
@@ -264,6 +363,31 @@ public final class EnvInstaller {
     private static void requireFile(File file, String name) {
         if (!file.isFile()) {
             throw new IllegalStateException("required env file missing: " + name + " at " + file);
+        }
+    }
+
+    /**
+     * Checks a library by base name, tolerating a versioned soname
+     * (e.g. libsqlite3.so.3.54.1) or a symlink in the same directory.
+     */
+    private static boolean hasLibrary(File dir, String baseName) {
+        if (new File(dir, baseName).exists()) {
+            return true;
+        }
+        File[] siblings = dir.listFiles();
+        if (siblings != null) {
+            for (File sibling : siblings) {
+                if (sibling.getName().startsWith(baseName)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static void requireAny(File dir, String baseName, String label) {
+        if (!hasLibrary(dir, baseName)) {
+            throw new IllegalStateException("required env file missing: " + label + " in " + dir);
         }
     }
 

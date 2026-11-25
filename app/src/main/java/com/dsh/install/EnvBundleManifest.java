@@ -26,23 +26,33 @@ public final class EnvBundleManifest {
     public final String bundleId;
     public final String bootstrapSha256;
     public final String bootstrapArmSha256;
+    public final String bootstrapX86Sha256;
+    public final String bootstrapX64Sha256;
     public final String overlaySha256;
     public final String pkgSha256;
     public final int bootstrapSymlinkCount;
     public final int bootstrapArmSymlinkCount;
+    public final int bootstrapX86SymlinkCount;
+    public final int bootstrapX64SymlinkCount;
     public final List<String> seedPackages;
 
     private EnvBundleManifest(String bundleId, String bootstrapSha256, String bootstrapArmSha256,
+                              String bootstrapX86Sha256, String bootstrapX64Sha256,
                               String overlaySha256, String pkgSha256,
                               int bootstrapSymlinkCount, int bootstrapArmSymlinkCount,
+                              int bootstrapX86SymlinkCount, int bootstrapX64SymlinkCount,
                               List<String> seedPackages) {
         this.bundleId = bundleId;
         this.bootstrapSha256 = bootstrapSha256;
         this.bootstrapArmSha256 = bootstrapArmSha256;
+        this.bootstrapX86Sha256 = bootstrapX86Sha256;
+        this.bootstrapX64Sha256 = bootstrapX64Sha256;
         this.overlaySha256 = overlaySha256;
         this.pkgSha256 = pkgSha256;
         this.bootstrapSymlinkCount = bootstrapSymlinkCount;
         this.bootstrapArmSymlinkCount = bootstrapArmSymlinkCount;
+        this.bootstrapX86SymlinkCount = bootstrapX86SymlinkCount;
+        this.bootstrapX64SymlinkCount = bootstrapX64SymlinkCount;
         this.seedPackages = Collections.unmodifiableList(seedPackages);
     }
 
@@ -55,10 +65,14 @@ public final class EnvBundleManifest {
             }
             String bundleId = requireSha256(json.getString("bundleId"), "bundleId");
             String bootstrapSha = requireSha256(json.getString("bootstrapSha256"), "bootstrapSha256");
-            String bootstrapArmSha = json.optString("bootstrapArmSha256", null);
-            if (bootstrapArmSha != null && bootstrapArmSha.isEmpty()) {
-                bootstrapArmSha = null;
-            }
+            // The ARM bootstrap is optional for arm64 APKs but mandatory for
+            // 32-bit userspaces: without it the installer would silently fall
+            // back to the aarch64 bootstrap, which cannot exec and always fails
+            // the smoke test. Validate its shape here so a malformed value
+            // fails closed instead of surfacing as a link error at runtime.
+            String bootstrapArmSha = optionalSha256(json, "bootstrapArmSha256");
+            String bootstrapX86Sha = optionalSha256(json, "bootstrapX86Sha256");
+            String bootstrapX64Sha = optionalSha256(json, "bootstrapX64Sha256");
             String overlaySha = requireSha256(json.getString("overlaySha256"), "overlaySha256");
             String pkgSha = requireSha256(json.getString("pkgSha256"), "pkgSha256");
             int symlinks = json.getInt("bootstrapSymlinkCount");
@@ -66,6 +80,8 @@ public final class EnvBundleManifest {
                 throw new IllegalStateException("env manifest contains no bootstrap symlinks");
             }
             int armSymlinks = json.optInt("bootstrapArmSymlinkCount", 0);
+            int x86Symlinks = json.optInt("bootstrapX86SymlinkCount", 0);
+            int x64Symlinks = json.optInt("bootstrapX64SymlinkCount", 0);
             JSONArray packagesJson = json.getJSONArray("seedPackages");
             List<String> packages = new ArrayList<>();
             for (int i = 0; i < packagesJson.length(); i++) {
@@ -77,8 +93,9 @@ public final class EnvBundleManifest {
                     packages.add(name);
                 }
             }
-            return new EnvBundleManifest(bundleId, bootstrapSha, bootstrapArmSha, overlaySha,
-                    pkgSha, symlinks, armSymlinks, packages);
+            return new EnvBundleManifest(bundleId, bootstrapSha, bootstrapArmSha,
+                    bootstrapX86Sha, bootstrapX64Sha, overlaySha,
+                    pkgSha, symlinks, armSymlinks, x86Symlinks, x64Symlinks, packages);
         } catch (IOException e) {
             throw new IllegalStateException("required asset missing: " + EnvPaths.ASSET_MANIFEST, e);
         } catch (org.json.JSONException e) {
@@ -105,5 +122,14 @@ public final class EnvBundleManifest {
             throw new IllegalStateException("invalid env manifest field: " + name);
         }
         return value;
+    }
+
+    /** Reads an optional sha256 field, validating it when present. */
+    private static String optionalSha256(JSONObject json, String name) {
+        String value = json.optString(name, null);
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        return requireSha256(value, name);
     }
 }

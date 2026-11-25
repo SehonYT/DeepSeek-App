@@ -71,12 +71,19 @@ def make_manifest(root: Path) -> dict:
         "seedPackages": read_seed_packages(root),
     }
 
-    bootstrap_arm = root / "bootstrap" / "bootstrap-arm.tar.gz"
-    if bootstrap_arm.is_file():
-        with tarfile.open(bootstrap_arm, "r:gz") as archive:
-            arm_symlinks = sum(member.issym() for member in archive)
-        identity["bootstrapArmSha256"] = sha256_file(bootstrap_arm)
-        identity["bootstrapArmSymlinkCount"] = arm_symlinks
+    # Every bundled ABI is described in the manifest so the installer can pick
+    # the bootstrap that matches the device ABI and verify it fail-closed.
+    for key, filename in (
+        ("Arm", "bootstrap-arm.tar.gz"),
+        ("X86", "bootstrap-x86.tar.gz"),
+        ("X64", "bootstrap-x86_64.tar.gz"),
+    ):
+        archive_path = root / "bootstrap" / filename
+        if archive_path.is_file():
+            with tarfile.open(archive_path, "r:gz") as archive:
+                symlinks = sum(member.issym() for member in archive)
+            identity["bootstrap%sSha256" % key] = sha256_file(archive_path)
+            identity["bootstrap%sSymlinkCount" % key] = symlinks
 
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return {**identity, "bundleId": hashlib.sha256(canonical).hexdigest()}

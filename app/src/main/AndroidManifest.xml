@@ -43,6 +43,20 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!--
+      CAMERA and RECORD_AUDIO imply REQUIRED hardware features, which makes the
+      APK uninstallable ("App not installed") on devices without a camera or
+      microphone, and blocks installation on devices that filter by feature.
+      This app treats both as optional capabilities, so declare them
+      not-required explicitly.
+    -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <permission
         android:name="com.dsh.permission.INTERNAL_BROADCAST"
         android:protectionLevel="signature" />

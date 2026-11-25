@@ -19,9 +19,16 @@ vendor/*
 *.tar.xz
 *.bin
 *.idsig
-!env/bootstrap/bootstrap.tar.gz
-!env/bootstrap/bootstrap-arm.tar.gz
+
+# Per-ABI Termux userspaces are BUILT, not committed (env/build.sh bootstrap).
+# Committing them shipped a stale agnostic/arm tarball with no node, which made
+# installs fail. CI rebuilds all four ABIs from pinned inputs.
 env/dist/
+env/bootstrap/*.tar.gz
+env/bootstrap/*.zip
+env/*-packages/
+env/packages/*.deb
+!env/packages/.gitkeep
 
 # Python cache
 __pycache__/

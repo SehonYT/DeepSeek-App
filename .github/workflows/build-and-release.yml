@@ -91,11 +91,80 @@ jobs:
           echo "[CI] 1. Cloning deepseek-harness source..."
           git clone --depth 1 https://github.com/salmanbappi/deepseek-harness.git archives/dsh-source
 
-          echo "[CI] 2. Assembling compact runtime bundle (<= 45MB)..."
+          echo "[CI] 2. Assembling compact runtime bundle..."
           python3 scripts/assemble_runtime.py archives/dsh-source archives/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz
 
           echo "[CI] 3. Verifying assembled archive..."
           ls -lh archives/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz
+
+          echo "[CI] 4. Verifying per-ABI node-pty prebuilds are present..."
+          python3 - <<'PY'
+          import tarfile, sys
+          required = [
+              "node_modules/node-pty/prebuilds/android-arm64/pty.node",
+              "node_modules/node-pty/prebuilds/android-arm/pty.node",
+          ]
+          with tarfile.open("archives/dsh-termux-prebuilt-v0.2.2-rc.3.tar.gz") as t:
+              names = set(n.lstrip("./") for n in t.getnames())
+          missing = [r for r in required if r not in names]
+          if missing:
+              print("::error::runtime bundle is missing node-pty prebuilds: %s" % missing)
+              sys.exit(1)
+          # build/Release must not exist: it is arch-specific and shadows prebuilds.
+          shadow = [n for n in names if "/node-pty/build/Release/" in n]
+          if shadow:
+              print("::error::arch-specific build/Release shadow present: %s" % shadow)
+              sys.exit(1)
+          print("[CI] node-pty prebuilds OK for android-arm64 + android-arm")
+          PY
+
+      - name: Build per-ABI Android Userspaces (arm64, arm32, x86, x86_64)
+        run: |
+          # Every ABI needs its own Bionic prefix: bash/node/libs are native ELFs
+          # and a device can only execute its own ABI. The build downloads the
+          # pinned Termux bootstraps and the matching Node.js .deb stack, then
+          # fails closed if any ABI is missing bin/node.
+          bash env/build.sh bootstrap
+
+          echo "[CI] Bundled userspaces:"
+          ls -lh env/bootstrap/bootstrap*.tar.gz
+
+      - name: Verify Bundled Userspaces Cover All ABIs
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, sys, tarfile
+          expected = {
+              "bootstrap.tar.gz":         ("aarch64", "aarch64"),
+              "bootstrap-arm.tar.gz":     ("armeabi-v7a", "arm"),
+              "bootstrap-x86.tar.gz":     ("x86", "i686"),
+              "bootstrap-x86_64.tar.gz":  ("x86_64", "x86_64"),
+          }
+          failures = []
+          for name, (abi_label, _) in expected.items():
+              path = "env/bootstrap/" + name
+              try:
+                  with tarfile.open(path) as t:
+                      members = set(m.lstrip("./") for m in t.getnames())
+              except Exception as e:
+                  failures.append(f"{name}: cannot open ({e})")
+                  continue
+              for required in ("bin/bash", "bin/node", "bin/pkg", "lib/libtermux-exec.so"):
+                  if required not in members:
+                      failures.append(f"{name} ({abi_label}): missing {required}")
+              if not any(m.startswith("lib/libsqlite3.so") for m in members):
+                  failures.append(f"{name} ({abi_label}): missing libsqlite3")
+              print(f"[CI] {name} ({abi_label}): OK")
+          if failures:
+              for f in failures:
+                  print("::error::" + f)
+              sys.exit(1)
+          PY
+
+      - name: Stage Userspaces and Generate Env Manifest
+        run: |
+          bash env/build.sh assets
+          echo "[CI] Env manifest:"
+          cat env/dist/env/manifest.json
 
       - name: Sync App Version from Tag
         run: |

@@ -285,20 +285,29 @@ module.exports.default = module.exports;
         # Prune build/src/third_party/other-arch prebuilds
         for prune_dir in ["src", "third_party"]:
             shutil.rmtree(os.path.join(src_pty_pkg, prune_dir), ignore_errors=True)
+        # Keep only the Android prebuilds we actually vendor. node-pty resolves
+        # native modules from build/Release, then build/Debug, then
+        # prebuilds/<process.platform>-<process.arch> (see lib/utils.js).
+        # Shipping a single build/Release/pty.node for one arch makes the other
+        # arch fail; a universal APK must ship one prebuild per ABI and leave
+        # build/Release empty so the loader falls through to the matching prebuild.
         pb_dir = os.path.join(src_pty_pkg, "prebuilds")
         if os.path.isdir(pb_dir):
             for arch in os.listdir(pb_dir):
-                if arch != "android-arm64":
+                if arch not in ("android-arm64", "android-arm"):
                     shutil.rmtree(os.path.join(pb_dir, arch), ignore_errors=True)
-        # Inject our android-arm64 pty.node
-        pty_source = os.path.join(PROJECT_ROOT, "vendor", "native", "android-arm64", "pty.node")
-        if os.path.isfile(pty_source):
-            android_pb = os.path.join(src_pty_pkg, "prebuilds", "android-arm64")
-            build_rel = os.path.join(src_pty_pkg, "build", "Release")
-            os.makedirs(android_pb, exist_ok=True)
-            os.makedirs(build_rel, exist_ok=True)
-            shutil.copy2(pty_source, os.path.join(android_pb, "pty.node"))
-            shutil.copy2(pty_source, os.path.join(build_rel, "pty.node"))
+        for abi in ("android-arm64", "android-arm"):
+            pty_source = os.path.join(PROJECT_ROOT, "vendor", "native", abi, "pty.node")
+            if not os.path.isfile(pty_source):
+                print(f"[!] Warning: missing vendored {abi} pty.node; {abi} devices will not have PTY support")
+                continue
+            abi_dir = os.path.join(src_pty_pkg, "prebuilds", abi)
+            os.makedirs(abi_dir, exist_ok=True)
+            shutil.copy2(pty_source, os.path.join(abi_dir, "pty.node"))
+            print(f"[OK] Vendored {abi} pty.node")
+        # Never ship build/Release: it is arch-specific and would shadow the
+        # correct prebuild on the other ABI.
+        shutil.rmtree(os.path.join(src_pty_pkg, "build"), ignore_errors=True)
 
         # Install node-pty into work_dir/node_modules, apps/cli/node_modules, and packages/subprocess/subprocess-local/node_modules
         subprocess_local_dir = os.path.join(work_dir, "packages", "subprocess", "subprocess-local")

@@ -17,11 +17,19 @@ fi
 echo "[*] [08_sign] Signing APK with $KEYSTORE (alias: $KEY_ALIAS)..."
 mkdir -p "$(dirname "$OUT_APK")"
 
+# apksigner only enables the v1 JAR scheme when minSdkVersion < 24; with
+# minSdk 24 it silently drops v1. Some vendors/installers (and any tool that
+# falls back to JAR verification) then reject the APK. Enable all three
+# schemes explicitly so the APK verifies on every supported Android version.
 apksigner sign \
     --ks "$KEYSTORE" \
     --ks-key-alias "$KEY_ALIAS" \
     --ks-pass "pass:$STORE_PASS" \
     --key-pass "pass:$KEY_PASS" \
+    --v1-signing-enabled true \
+    --v2-signing-enabled true \
+    --v3-signing-enabled true \
+    --min-sdk-version 24 \
     --out "$OUT_APK" \
     "$ALIGNED_APK"
 
