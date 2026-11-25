@@ -75,18 +75,23 @@ build_one() {
 
     # Fail closed: a bootstrap without node cannot install, so verify here rather
     # than letting the APK ship a prefix that always fails its smoke test.
-    local members member ok=1
-    members="$(tar -tzf "$out")"
+    # NOTE: write the listing to a file instead of piping into grep. With
+    # `set -o pipefail`, `printf | grep -q` reports SIGPIPE as a failure and
+    # makes this check fail on a perfectly good archive.
+    local member ok=1
+    local listing="$out.members"
+    tar -tzf "$out" > "$listing"
     for member in ./bin/bash ./bin/node ./bin/pkg ./lib/libtermux-exec.so; do
-        if ! printf '%s\n' "$members" | grep -qx -- "$member"; then
+        if ! grep -qx -- "$member" "$listing"; then
             log "ERROR: $outname is missing $member"
             ok=0
         fi
     done
-    if ! printf '%s\n' "$members" | grep -qE '^\./lib/libsqlite3\.so'; then
+    if ! grep -qE '^\./lib/libsqlite3\.so' "$listing"; then
         log "ERROR: $outname is missing libsqlite3"
         ok=0
     fi
+    rm -f "$listing"
     if [ "$ok" != "1" ]; then
         rm -f "$out"
         return 1
