@@ -3,10 +3,14 @@ package com.dsh.core;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 
+import com.dsh.install.BootStateStamp;
 import com.dsh.install.EnvInstaller;
+import com.dsh.runtime.CoreInstaller;
 import com.dsh.runtime.RuntimeManager;
+import com.dsh.runtime.ShellBridgeInstaller;
 import com.dsh.util.ProcessUtils;
 
 import java.io.File;
@@ -74,20 +78,49 @@ public final class CoreLauncher {
         // 1. Terminate any previous orphan instances
         killOrphanCoreProcesses();
 
-        // 2. Ensure Termux bootstrap is extracted first so node & bash are available
-        if (!EnvInstaller.isInstalled(context)) {
-            Log.i(TAG, "First boot: installing Termux bootstrap environment...");
-            EnvInstaller.install(context);
+        String envBundleId = EnvInstaller.readBundledBundleId(context);
+        String coreHash = CoreInstaller.getExpectedRuntimeHash(context);
+        File prefix = EnvInstaller.prefix(context);
+
+        long tCheck = SystemClock.elapsedRealtime();
+        boolean warmReady = BootStateStamp.isWarmReady(
+                context, prefix, runtime.getRuntimeDir(), runtime.getBinDir(),
+                envBundleId, coreHash, ShellBridgeInstaller.BRIDGE_FORMAT);
+
+        if (warmReady) {
+            BootMetrics.setColdInstall(false);
+            long checkMs = SystemClock.elapsedRealtime() - tCheck;
+            BootMetrics.setEnvCheckMs(checkMs);
+            BootMetrics.setCoreCheckMs(0);
+            Log.i(TAG, "warm-boot fast-path hit (" + checkMs + "ms); launching node directly");
+        } else {
+            BootMetrics.setColdInstall(true);
+            // 2. Ensure Termux bootstrap is extracted first so node & bash are available
+            long tEnv = SystemClock.elapsedRealtime();
+            if (!EnvInstaller.isInstalled(context)) {
+                Log.i(TAG, "First boot: installing Termux bootstrap environment...");
+                EnvInstaller.install(context);
+            }
+            BootMetrics.setEnvCheckMs(SystemClock.elapsedRealtime() - tEnv);
+
+            // 3. Extract DeepSeek runtime bundle & web UI
+            long tCore = SystemClock.elapsedRealtime();
+            runtime.installCore();
+            BootMetrics.setCoreCheckMs(SystemClock.elapsedRealtime() - tCore);
+
+            // Persist composite stamp so subsequent launches hit the <1ms warm-boot path
+            String installedEnvId = EnvInstaller.readInstalledBundleId(context);
+            BootStateStamp.write(context,
+                    !envBundleId.isEmpty() ? envBundleId : installedEnvId,
+                    coreHash,
+                    ShellBridgeInstaller.BRIDGE_FORMAT);
         }
 
-        // 3. Extract DeepSeek runtime bundle
-        runtime.installCore();
-
-        // 4. Launch DeepSeek process immediately without competing background env sync;
-        // CoreProcessSupervisor triggers runtime.installEnvInBackground() once the core is ready.
+        // 4. Launch DeepSeek process immediately; CoreProcessSupervisor handles post-ready tasks.
         ProcessBuilder pb = new ProcessBuilder(runtime.coreCommand());
         pb.directory(filesDir);
         runtime.applyEnvironment(pb);
+        BootMetrics.markFork();
         Log.i(TAG, "Starting DeepSeek process: " + Arrays.toString(runtime.coreCommand()));
         return pb.start();
     }

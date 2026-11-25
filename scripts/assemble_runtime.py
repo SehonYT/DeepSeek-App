@@ -45,6 +45,129 @@ def copy_tree_files(src_dir, dst_dir):
                 shutil.copy2(src_f, dst_f)
 
 
+def link_cli_node_modules(work_dir: str, cli_dir: str):
+    """Symlink third-party packages from apps/cli/node_modules -> ../../node_modules
+    to avoid duplicating thousands of files on mobile flash."""
+    root_nm = os.path.join(work_dir, "node_modules")
+    cli_nm = os.path.join(cli_dir, "node_modules")
+    os.makedirs(cli_nm, exist_ok=True)
+    linked = 0
+    for item in os.listdir(root_nm):
+        if item.startswith(".") or item == "@deepseek-ai":
+            continue
+        src_item = os.path.join(root_nm, item)
+        if item.startswith("@") and os.path.isdir(src_item):
+            scope_dir = os.path.join(cli_nm, item)
+            os.makedirs(scope_dir, exist_ok=True)
+            for sub in os.listdir(src_item):
+                dst_sub = os.path.join(scope_dir, sub)
+                if not os.path.lexists(dst_sub):
+                    os.symlink(os.path.join("../../../node_modules", item, sub), dst_sub)
+                    linked += 1
+        else:
+            dst_item = os.path.join(cli_nm, item)
+            if not os.path.lexists(dst_item):
+                os.symlink(os.path.join("../../node_modules", item), dst_item)
+                linked += 1
+    print(f"[OK] Symlinked {linked} third-party entries into apps/cli/node_modules (zero duplication).")
+
+
+def flatten_pure_js_packages(root_nm: str, iso_dir: str):
+    """Optionally flatten heavy multi-file pure-JS dependencies with esbuild to cut stat()/open() storms."""
+    esbuild_bin = shutil.which("esbuild")
+    if not esbuild_bin:
+        iso_esbuild = os.path.join(iso_dir, "node_modules", ".bin", "esbuild")
+        if os.path.isfile(iso_esbuild):
+            esbuild_bin = iso_esbuild
+    if not esbuild_bin:
+        print("[*] esbuild not available; skipping dependency flattening.")
+        return
+
+    # Only flatten self-contained pure-JS packages with simple single-entry main/default exports
+    # and zero native addons, WASM assets, or dynamic worker files.
+    candidates = [
+        "zod", "ajv", "yaml", "semver", "commander", "ws", "diff", "got",
+        "execa", "chokidar", "undici", "turndown", "fuzzysort", "minisearch",
+        "compression", "serve-static", "rrule", "shell-quote", "js-yaml",
+        "@anthropic-ai/sdk", "@noble/hashes", "@js-temporal/polyfill",
+    ]
+    flattened = 0
+    for pkg_name in candidates:
+        pkg_dir = os.path.join(root_nm, *pkg_name.split("/"))
+        pj_path = os.path.join(pkg_dir, "package.json")
+        if not os.path.isfile(pj_path):
+            continue
+        try:
+            with open(pj_path, "r", encoding="utf-8") as f:
+                pj = json.load(f)
+        except Exception:
+            continue
+        if pj.get("bin"):
+            continue
+        # Count JS files first; skip already-compact packages (<= 8 files)
+        js_count = sum(1 for _, _, files in os.walk(pkg_dir) for fn in files if fn.endswith((".js", ".mjs", ".cjs")))
+        if js_count <= 8:
+            continue
+        # Only flatten packages whose exports only expose '.' (or no subpath exports)
+        exports = pj.get("exports")
+        if isinstance(exports, dict) and any(k.startswith("./") and k != "./package.json" for k in exports):
+            continue
+
+        entry = None
+        if isinstance(exports, dict) and "." in exports:
+            dot = exports["."]
+            if isinstance(dot, str):
+                entry = dot
+            elif isinstance(dot, dict):
+                entry = dot.get("import") or dot.get("default") or dot.get("node") or dot.get("require")
+                if isinstance(entry, dict):
+                    entry = entry.get("default") or entry.get("import") or entry.get("require")
+        if not entry:
+            entry = pj.get("module") or pj.get("main") or "index.js"
+        entry_abs = os.path.normpath(os.path.join(pkg_dir, entry))
+        if not os.path.isfile(entry_abs):
+            continue
+
+        bundle_out = os.path.join(pkg_dir, "bundle.cjs")
+        cmd = [
+            esbuild_bin,
+            entry_abs,
+            "--bundle",
+            "--platform=node",
+            "--target=node26",
+            "--format=cjs",
+            "--minify-whitespace",
+            "--minify-syntax",
+            "--keep-names",
+            "--packages=external",
+            "--external:internal/*",
+            "--external:*.node",
+            "--external:*.wasm",
+            f"--outfile={bundle_out}",
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0 or not os.path.isfile(bundle_out):
+            continue
+        # Replace package JS tree with single bundle.cjs + updated package.json
+        for item in os.listdir(pkg_dir):
+            if item in ("package.json", "bundle.cjs", "LICENSE", "LICENSE.md"):
+                continue
+            p = os.path.join(pkg_dir, item)
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            elif item.endswith((".js", ".mjs", ".cjs", ".map", ".d.ts")):
+                os.remove(p)
+        pj["main"] = "./bundle.cjs"
+        pj.pop("module", None)
+        pj.pop("type", None)
+        if "exports" in pj:
+            pj["exports"] = {".": "./bundle.cjs", "./package.json": "./package.json"}
+        with open(pj_path, "w", encoding="utf-8") as f:
+            json.dump(pj, f, separators=(",", ":"))
+        flattened += 1
+    print(f"[OK] esbuild flattened {flattened} multi-file npm packages into single CJS bundles.")
+
+
 def normalize_arch(arch: str) -> str:
     val = (arch or "universal").strip().lower()
     if val in ("universal", "all", "fat"):
@@ -198,22 +321,22 @@ def assemble_bundle(source_repo: str, out_archive: str, target_arch: str = "univ
         "ajv@^8.20.0"
     ]
     iso_dir = tempfile.mkdtemp(prefix="dsh_npm_iso_")
+    root_nm = os.path.join(work_dir, "node_modules")
     try:
         run(["npm", "install", "--no-package-lock", "--omit=dev", "--legacy-peer-deps"] + prod_pkgs, cwd=iso_dir)
         iso_nm = os.path.join(iso_dir, "node_modules")
         if os.path.isdir(iso_nm):
-            # Copy into root node_modules and apps/cli/node_modules
-            for target_nm in [os.path.join(work_dir, "node_modules"), os.path.join(cli_dir, "node_modules")]:
-                os.makedirs(target_nm, exist_ok=True)
-                for item in os.listdir(iso_nm):
-                    if item.startswith("."):
-                        continue
-                    src_item = os.path.join(iso_nm, item)
-                    dst_item = os.path.join(target_nm, item)
-                    if os.path.isdir(src_item):
-                        copy_tree_files(src_item, dst_item)
-                    else:
-                        shutil.copy2(src_item, dst_item)
+            os.makedirs(root_nm, exist_ok=True)
+            for item in os.listdir(iso_nm):
+                if item.startswith("."):
+                    continue
+                src_item = os.path.join(iso_nm, item)
+                dst_item = os.path.join(root_nm, item)
+                if os.path.isdir(src_item):
+                    copy_tree_files(src_item, dst_item)
+                else:
+                    shutil.copy2(src_item, dst_item)
+        flatten_pure_js_packages(root_nm, iso_dir)
     finally:
         shutil.rmtree(iso_dir, ignore_errors=True)
 
@@ -263,27 +386,25 @@ module.exports = createKoffiStub();
 module.exports.default = module.exports;
 """
     koffi_pj = json.dumps({"name": "koffi", "version": "2.9.12", "main": "index.js", "type": "commonjs"}, indent=2)
-    for target_nm in [os.path.join(work_dir, "node_modules"), os.path.join(cli_dir, "node_modules")]:
-        k_dir = os.path.join(target_nm, "koffi")
-        os.makedirs(k_dir, exist_ok=True)
-        with open(os.path.join(k_dir, "index.js"), "w", encoding="utf-8") as f:
-            f.write(koffi_stub_code)
-        with open(os.path.join(k_dir, "package.json"), "w", encoding="utf-8") as f:
-            f.write(koffi_pj)
+    k_dir = os.path.join(root_nm, "koffi")
+    os.makedirs(k_dir, exist_ok=True)
+    with open(os.path.join(k_dir, "index.js"), "w", encoding="utf-8") as f:
+        f.write(koffi_stub_code)
+    with open(os.path.join(k_dir, "package.json"), "w", encoding="utf-8") as f:
+        f.write(koffi_pj)
 
     print("[*] 5. Installing mobile sharp-wasm32 and @emnapi/runtime...")
-    for target_nm in [os.path.join(work_dir, "node_modules"), os.path.join(cli_dir, "node_modules")]:
-        img_dir = os.path.join(target_nm, "@img")
-        emnapi_dir = os.path.join(target_nm, "@emnapi")
-        os.makedirs(img_dir, exist_ok=True)
-        os.makedirs(emnapi_dir, exist_ok=True)
-        run(f'curl -sL https://registry.npmjs.org/@img/sharp-wasm32/-/sharp-wasm32-0.35.5.tgz | tar -xz -C "{img_dir}"')
-        shutil.rmtree(os.path.join(img_dir, "sharp-wasm32"), ignore_errors=True)
-        os.rename(os.path.join(img_dir, "package"), os.path.join(img_dir, "sharp-wasm32"))
+    img_dir = os.path.join(root_nm, "@img")
+    emnapi_dir = os.path.join(root_nm, "@emnapi")
+    os.makedirs(img_dir, exist_ok=True)
+    os.makedirs(emnapi_dir, exist_ok=True)
+    run(f'curl -sL https://registry.npmjs.org/@img/sharp-wasm32/-/sharp-wasm32-0.35.5.tgz | tar -xz -C "{img_dir}"')
+    shutil.rmtree(os.path.join(img_dir, "sharp-wasm32"), ignore_errors=True)
+    os.rename(os.path.join(img_dir, "package"), os.path.join(img_dir, "sharp-wasm32"))
 
-        run(f'curl -sL https://registry.npmjs.org/@emnapi/runtime/-/runtime-1.11.3.tgz | tar -xz -C "{emnapi_dir}"')
-        shutil.rmtree(os.path.join(emnapi_dir, "runtime"), ignore_errors=True)
-        os.rename(os.path.join(emnapi_dir, "package"), os.path.join(emnapi_dir, "runtime"))
+    run(f'curl -sL https://registry.npmjs.org/@emnapi/runtime/-/runtime-1.11.3.tgz | tar -xz -C "{emnapi_dir}"')
+    shutil.rmtree(os.path.join(emnapi_dir, "runtime"), ignore_errors=True)
+    os.rename(os.path.join(emnapi_dir, "package"), os.path.join(emnapi_dir, "runtime"))
 
     print(f"[*] 6. Installing complete node-pty package (arch={target_arch})...")
     node_pty_tmp = tempfile.mkdtemp(prefix="dsh_node_pty_")
@@ -329,11 +450,10 @@ module.exports.default = module.exports;
         else:
             shutil.rmtree(os.path.join(src_pty_pkg, "build", "Release"), ignore_errors=True)
 
-        # Install node-pty into work_dir/node_modules, apps/cli/node_modules, and packages/subprocess/subprocess-local/node_modules
+        # Install node-pty into work_dir/node_modules and packages/subprocess/subprocess-local/node_modules
         subprocess_local_dir = os.path.join(work_dir, "packages", "subprocess", "subprocess-local")
         target_dirs = [
-            os.path.join(work_dir, "node_modules", "node-pty"),
-            os.path.join(cli_dir, "node_modules", "node-pty"),
+            os.path.join(root_nm, "node-pty"),
             os.path.join(subprocess_local_dir, "node_modules", "node-pty")
         ]
         for td in target_dirs:
@@ -343,6 +463,13 @@ module.exports.default = module.exports;
             copy_tree_files(src_pty_pkg, td)
     finally:
         shutil.rmtree(node_pty_tmp, ignore_errors=True)
+
+    link_cli_node_modules(work_dir, cli_dir)
+
+    boot_wrapper = os.path.join(SCRIPT_DIR, "dsh_boot.mjs")
+    if os.path.isfile(boot_wrapper):
+        shutil.copy2(boot_wrapper, os.path.join(cli_dir, "lib", "dsh_boot.mjs"))
+        print("[OK] Staged dsh_boot.mjs launcher wrapper.")
 
     print("[*] 7. Applying mobile patches...")
     patch_script = os.path.join(source_repo, "scripts", "patch_termux.py")
@@ -363,8 +490,8 @@ module.exports.default = module.exports;
             if d in ("tests", "benchmarks", ".git", ".github", "__tests__"):
                 shutil.rmtree(os.path.join(root, d), ignore_errors=True)
         for f in files:
-            # Preserve .md (README, plugin details, docs) and .d.ts
-            if f.endswith((".ts", ".map", ".test.js", ".spec.js", ".tsbuildinfo")) and not f.endswith(".d.ts"):
+            # Strip TypeScript declarations, maps, tests, and tsbuildinfo not needed at runtime
+            if f.endswith((".ts", ".mts", ".cts", ".map", ".test.js", ".spec.js", ".tsbuildinfo")):
                 try:
                     os.remove(os.path.join(root, f))
                 except Exception:
@@ -375,7 +502,10 @@ module.exports.default = module.exports;
     if os.path.exists(out_archive):
         os.remove(out_archive)
 
-    run(["tar", "-czf", out_archive, "-C", work_dir, "."])
+    if out_archive.endswith((".tar.zst", ".tzst")):
+        run(f'tar -cf - -C "{work_dir}" . | zstd -19 -T0 -q -o "{out_archive}"')
+    else:
+        run(["tar", "-czf", out_archive, "-C", work_dir, "."])
 
     size_mb = os.path.getsize(out_archive) / (1024 * 1024)
     print("=" * 60)

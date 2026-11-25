@@ -136,6 +136,9 @@ public class MainActivity extends Activity
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (CoreRuntimeState.serverUrl == null) {
+            com.dsh.core.BootMetrics.resetSession();
+        }
         activeActivity = this;
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
@@ -147,13 +150,17 @@ public class MainActivity extends Activity
         themeManager = new ThemeManager(this);
         themeManager.applyToActivity(this);
 
+        // Start CoreServerService BEFORE WebViewHost init so node fork runs in parallel with Chromium startup.
+        startCoreService();
 
         oauthManager = new OAuthManager();
         runtimeManager = new RuntimeManager(this);
         shizukuBridge = new ShizukuBridge(this);
         androidBridge = new AndroidBridge(this, runtimeManager, shizukuBridge, themeManager);
         androidBridge.setActivity(this);
+        com.dsh.core.BootMetrics.markWebviewInitStart();
         webViewHost = new WebViewHost(this, themeManager, oauthManager, androidBridge, this);
+        com.dsh.core.BootMetrics.markWebviewInitDone();
         webViewHost.setListener(this);
 
         rootLayout = new FrameLayout(this);
@@ -171,8 +178,6 @@ public class MainActivity extends Activity
 
         splashDeadline = System.currentTimeMillis() + SPLASH_TIMEOUT_MS;
         requestAppPermissions();
-
-        startCoreService();
     }
 
     private void startCoreService() {
@@ -197,6 +202,7 @@ public class MainActivity extends Activity
         splashDeadline = System.currentTimeMillis() + SPLASH_TIMEOUT_MS;
         splash.showLoading();
         CoreServiceLauncher.stop(this);
+        com.dsh.install.BootStateStamp.invalidate(this);
         try {
             java.io.File marker = new java.io.File(runtimeManager.getRuntimeDir(), com.dsh.runtime.RuntimePaths.RUNTIME_MARKER);
             if (marker.exists()) {
@@ -239,6 +245,7 @@ public class MainActivity extends Activity
         handler.removeCallbacks(splashWatchdog);
         Log.i(TAG, "dismissSplash: fading out splashView");
         splash.dismiss();
+        com.dsh.core.BootMetrics.markUiPaint();
     }
 
     public WebView getWebView() {

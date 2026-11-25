@@ -30,12 +30,13 @@ public final class EnvBundleManifest {
     public final String pkgSha256;
     public final int bootstrapSymlinkCount;
     public final int bootstrapArmSymlinkCount;
+    public final String prepatchedPackage;
     public final List<String> seedPackages;
 
     private EnvBundleManifest(String bundleId, String bootstrapSha256, String bootstrapArmSha256,
                               String overlaySha256, String pkgSha256,
                               int bootstrapSymlinkCount, int bootstrapArmSymlinkCount,
-                              List<String> seedPackages) {
+                              String prepatchedPackage, List<String> seedPackages) {
         this.bundleId = bundleId;
         this.bootstrapSha256 = bootstrapSha256;
         this.bootstrapArmSha256 = bootstrapArmSha256;
@@ -43,6 +44,7 @@ public final class EnvBundleManifest {
         this.pkgSha256 = pkgSha256;
         this.bootstrapSymlinkCount = bootstrapSymlinkCount;
         this.bootstrapArmSymlinkCount = bootstrapArmSymlinkCount;
+        this.prepatchedPackage = prepatchedPackage;
         this.seedPackages = Collections.unmodifiableList(seedPackages);
     }
 
@@ -80,8 +82,12 @@ public final class EnvBundleManifest {
                     packages.add(name);
                 }
             }
+            String prepatchedPackage = json.optString("prepatchedPackage", null);
+            if (prepatchedPackage != null && prepatchedPackage.isEmpty()) {
+                prepatchedPackage = null;
+            }
             return new EnvBundleManifest(bundleId, bootstrapSha, bootstrapArmSha, overlaySha,
-                    pkgSha, symlinks, armSymlinks, packages);
+                    pkgSha, symlinks, armSymlinks, prepatchedPackage, packages);
         } catch (IOException e) {
             throw new IllegalStateException("required asset missing: " + EnvPaths.ASSET_MANIFEST, e);
         } catch (org.json.JSONException e) {

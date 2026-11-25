@@ -19,35 +19,36 @@ public final class CoreInstaller {
     }
 
     private static void extractArchive(Context ctx, String assetName, File destDir) throws IOException {
-        File tmp = File.createTempFile("dsh_archive", ".tar.gz", ctx.getCacheDir());
-        try {
-            AssetUnpacker.copyFile(ctx.getAssets(), assetName, tmp);
-            if (com.dsh.install.TarRunner.runToyboxTar(tmp, destDir, true)) {
-                Log.i(TAG, "Extracted " + assetName + " with system/toybox tar");
-                return;
+        boolean isZst = assetName.endsWith(".zst") || assetName.endsWith(".tzst");
+        try (java.io.InputStream raw = new java.io.BufferedInputStream(ctx.getAssets().open(assetName), 64 * 1024)) {
+            if (isZst) {
+                com.dsh.install.TarExtractor.untarZst(ctx, raw, destDir);
+                Log.i(TAG, "Streamed " + assetName + " with native zstd");
+            } else {
+                com.dsh.install.TarExtractor.untarGz(raw, destDir);
+                Log.i(TAG, "Streamed " + assetName + " with streaming gzip tar");
             }
-            Log.w(TAG, "System tar failed; using TarExtractor Java fallback for " + assetName);
-            try (java.io.InputStream in = new java.io.FileInputStream(tmp)) {
-                com.dsh.install.TarExtractor.untarGz(in, destDir);
-            }
-        } finally {
-            com.dsh.util.IoUtil.deleteQuietly(tmp);
         }
     }
 
-    public static void installCore(RuntimeManager rm) {
-        Context ctx = rm.appContext();
-        File runtimeDir = rm.getRuntimeDir();
+    public static String getExpectedRuntimeHash(Context ctx) {
+        String manifestHash = getAssetManifestHash(ctx);
+        if (manifestHash != null && !manifestHash.isEmpty()) {
+            return manifestHash;
+        }
         long lastUpdate = 0;
         try {
             lastUpdate = ctx.getPackageManager()
                     .getPackageInfo(ctx.getPackageName(), 0).lastUpdateTime;
         } catch (Exception ignored) {
         }
-        String manifestHash = getAssetManifestHash(ctx);
-        String expectedHash = (manifestHash != null && !manifestHash.isEmpty())
-                ? manifestHash
-                : (com.dsh.BuildConfig.APP_VERSION_CODE + ":" + lastUpdate);
+        return com.dsh.BuildConfig.APP_VERSION_CODE + ":" + lastUpdate;
+    }
+
+    public static void installCore(RuntimeManager rm) {
+        Context ctx = rm.appContext();
+        File runtimeDir = rm.getRuntimeDir();
+        String expectedHash = getExpectedRuntimeHash(ctx);
         boolean upToDate = isRuntimeUpToDate(rm, expectedHash)
                 && new File(runtimeDir, "dsh/apps/cli/lib/bin.js").isFile();
 
@@ -55,8 +56,16 @@ public final class CoreInstaller {
             Log.i(TAG, "extracting assets/runtime (first launch or runtime update)");
             try {
                 wipe(rm, runtimeDir);
-                if (hasAsset(ctx, "runtime/dsh.tar.gz")) {
-                    Log.i(TAG, "unpacking runtime/dsh.tar.gz bundle into runtime/dsh");
+                boolean hasZstd = com.dsh.install.TarExtractor.findZstdBinary(ctx) != null;
+                if (hasZstd && hasAsset(ctx, "runtime/dsh.tar.zst")) {
+                    Log.i(TAG, "streaming runtime/dsh.tar.zst bundle into runtime/dsh");
+                    File dshDir = new File(runtimeDir, "dsh");
+                    if (!dshDir.exists()) {
+                        dshDir.mkdirs();
+                    }
+                    extractArchive(ctx, "runtime/dsh.tar.zst", dshDir);
+                } else if (hasAsset(ctx, "runtime/dsh.tar.gz")) {
+                    Log.i(TAG, "streaming runtime/dsh.tar.gz bundle into runtime/dsh");
                     File dshDir = new File(runtimeDir, "dsh");
                     if (!dshDir.exists()) {
                         dshDir.mkdirs();

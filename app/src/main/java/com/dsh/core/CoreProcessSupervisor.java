@@ -34,6 +34,13 @@ public final class CoreProcessSupervisor {
     private volatile Process process;
     private volatile boolean stopping = false;
     private Thread worker;
+    private final Object readyLock = new Object();
+
+    private void notifyReadyLock() {
+        synchronized (readyLock) {
+            readyLock.notifyAll();
+        }
+    }
 
     public CoreProcessSupervisor(Context context, RuntimeManager runtime,
                                  OpenUrlWatcher openUrlWatcher,
@@ -92,6 +99,8 @@ public final class CoreProcessSupervisor {
                 CoreRuntimeState.lastError = null;
                 CoreRuntimeState.restarting = false;
                 CoreRuntimeState.detectedWebUrl = null;
+                CoreRuntimeState.httpBoundSeen = false;
+                openUrlWatcher.setReadyNotifier(this::notifyReadyLock);
                 CoreLogWriter.writeLine(log, "\n=== DeepSeek Core Launch (attempt " + (attempt + 1) + ") ===");
                 Process proc = CoreLauncher.launch(runtime, appContext.getFilesDir());
                 process = proc;
@@ -233,7 +242,7 @@ public final class CoreProcessSupervisor {
             }
             if (!ProcessUtils.isAlive(proc)) {
                 int code = ProcessUtils.exitCode(proc);
-                ProcessUtils.sleep(200);
+                ProcessUtils.sleep(100);
                 String lastLogs = getLastLinesFromLog(appContext.getFilesDir(), 10);
                 CoreRuntimeState.lastError = "core process exited before it became ready (exit code " + code + ")"
                         + (lastLogs.isEmpty() ? "" : "\n--- core.log tail ---\n" + lastLogs);
@@ -241,7 +250,7 @@ public final class CoreProcessSupervisor {
                 return false;
             }
             String detected = CoreRuntimeState.detectedWebUrl;
-            if (tcpOpenAt < 0 && CoreReadyProbe.probeOnce(appContext, port)) {
+            if (tcpOpenAt < 0 && (CoreRuntimeState.httpBoundSeen || detected != null || CoreReadyProbe.probeOnce(appContext, port))) {
                 tcpOpenAt = System.currentTimeMillis();
                 detected = CoreRuntimeState.detectedWebUrl;
             }
@@ -251,22 +260,33 @@ public final class CoreProcessSupervisor {
                     CoreRuntimeState.lastError = null;
                     CoreRuntimeState.restarting = false;
                     CoreRuntimeState.readyGeneration++;
+                    BootMetrics.markCoreReady();
                     String readyStatus = "core ready on 127.0.0.1:" + port + " (tokenized URL)";
                     Log.i(TAG, readyStatus);
                     CoreLogWriter.writeLine(log, readyStatus);
                     return true;
                 }
-                if (System.currentTimeMillis() - tcpOpenAt >= 2000L) {
+                if (System.currentTimeMillis() - tcpOpenAt >= 500L) {
                     CoreRuntimeState.serverUrl = CoreUrl.startUrl(port);
                     CoreRuntimeState.lastError = null;
                     CoreRuntimeState.restarting = false;
                     CoreRuntimeState.readyGeneration++;
+                    BootMetrics.markCoreReady();
                     String readyStatus = "core ready on 127.0.0.1:" + port + " (fallback URL)";
                     Log.i(TAG, readyStatus);
                     CoreLogWriter.writeLine(log, readyStatus);
                     return true;
                 }
-                ProcessUtils.sleep(40);
+            }
+            synchronized (readyLock) {
+                if (!stopping && CoreRuntimeState.detectedWebUrl == null && ProcessUtils.isAlive(proc)) {
+                    try {
+                        readyLock.wait(tcpOpenAt >= 0 ? 50L : 80L);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return false;
+                    }
+                }
             }
         }
         return false;
@@ -287,6 +307,8 @@ public final class CoreProcessSupervisor {
             }
         } catch (Exception e) {
             Log.w(TAG, "log stream ended", e);
+        } finally {
+            notifyReadyLock();
         }
     }
 

@@ -6,10 +6,30 @@
 set -eo pipefail
 
 ENV_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$ENV_DIR/.." && pwd)"
 ASSETS="${ASSETS:-$ENV_DIR/dist}"
 TARGET_ARCH="${TARGET_ARCH:-universal}"
+PREPATCH_PKG="${PREPATCH_PKG:-com.dsh}"
 
 log() { printf 'build: %s\n' "$*" >&2; }
+
+can_use_zstd_for_arch() {
+    local arch="$1"
+    command -v zstd >/dev/null 2>&1 || return 1
+    case "$arch" in
+        arm64-v8a)
+            [ -f "$PROJECT_ROOT/app/src/main/jniLibs/arm64-v8a/libdsh_zstd.so" ]
+            ;;
+        armeabi-v7a)
+            [ -f "$PROJECT_ROOT/app/src/main/jniLibs/armeabi-v7a/libdsh_zstd.so" ]
+            ;;
+        universal)
+            [ -f "$PROJECT_ROOT/app/src/main/jniLibs/arm64-v8a/libdsh_zstd.so" ] \
+                && [ -f "$PROJECT_ROOT/app/src/main/jniLibs/armeabi-v7a/libdsh_zstd.so" ]
+            ;;
+        *) return 1 ;;
+    esac
+}
 
 normalize_arch() {
     case "$1" in
@@ -21,8 +41,9 @@ normalize_arch() {
 }
 
 build_bootstrap_tar() {
+    local ext="${1:-tar.gz}"
     local zip="$ENV_DIR/bootstrap/bootstrap-aarch64.zip"
-    local out="$ENV_DIR/bootstrap/bootstrap.tar.gz"
+    local out="$ENV_DIR/bootstrap/bootstrap.${ext}"
     local deb_dir="$ENV_DIR/packages/aarch64"
     if [ ! -f "$zip" ]; then
         log "Downloading Termux bootstrap-aarch64.zip..."
@@ -39,13 +60,14 @@ build_bootstrap_tar() {
     for deb in "$ENV_DIR/packages"/*.deb "$deb_dir"/*.deb; do
         [ -f "$deb" ] && extra_args+=("--extra-deb" "$deb")
     done
-    python3 "$ENV_DIR/scripts/pack_bootstrap.py" --zip "$zip" --out "$out" "${extra_args[@]}"
-    log "bootstrap.tar.gz: $(du -h "$out" | cut -f1)"
+    python3 "$ENV_DIR/scripts/pack_bootstrap.py" --zip "$zip" --out "$out" --prepatch-pkg "$PREPATCH_PKG" "${extra_args[@]}"
+    log "bootstrap.${ext}: $(du -h "$out" | cut -f1)"
 }
 
 build_bootstrap_arm_tar() {
+    local ext="${1:-tar.gz}"
     local zip="$ENV_DIR/bootstrap/bootstrap-arm.zip"
-    local out="$ENV_DIR/bootstrap/bootstrap-arm.tar.gz"
+    local out="$ENV_DIR/bootstrap/bootstrap-arm.${ext}"
     local deb_dir="$ENV_DIR/packages/arm"
     if [ ! -f "$zip" ]; then
         log "Downloading Termux bootstrap-arm.zip..."
@@ -62,38 +84,46 @@ build_bootstrap_arm_tar() {
     for deb in "$deb_dir"/*.deb; do
         [ -f "$deb" ] && extra_args+=("--extra-deb" "$deb")
     done
-    python3 "$ENV_DIR/scripts/pack_bootstrap.py" --zip "$zip" --out "$out" "${extra_args[@]}"
-    log "bootstrap-arm.tar.gz: $(du -h "$out" | cut -f1)"
+    python3 "$ENV_DIR/scripts/pack_bootstrap.py" --zip "$zip" --out "$out" --prepatch-pkg "$PREPATCH_PKG" "${extra_args[@]}"
+    log "bootstrap-arm.${ext}: $(du -h "$out" | cut -f1)"
 }
 
 bootstrap_arm_has_node() {
-    local out="$ENV_DIR/bootstrap/bootstrap-arm.tar.gz"
-    [ -f "$out" ] && (tar -tzf "$out" ./bin/node >/dev/null 2>&1 || tar -tzf "$out" bin/node >/dev/null 2>&1)
+    local ext="${1:-tar.gz}"
+    local out="$ENV_DIR/bootstrap/bootstrap-arm.${ext}"
+    if [ "$ext" = "tar.zst" ]; then
+        [ -f "$out" ] && command -v zstd >/dev/null 2>&1 && (zstd -d -c "$out" 2>/dev/null | tar -tf - ./bin/node >/dev/null 2>&1 || zstd -d -c "$out" 2>/dev/null | tar -tf - bin/node >/dev/null 2>&1)
+    else
+        [ -f "$out" ] && (tar -tzf "$out" ./bin/node >/dev/null 2>&1 || tar -tzf "$out" bin/node >/dev/null 2>&1)
+    fi
 }
 
 pack_assets() {
-    local arch
+    local arch ext="tar.gz"
     arch="$(normalize_arch "$TARGET_ARCH")"
+    if can_use_zstd_for_arch "$arch"; then
+        ext="tar.zst"
+    fi
     rm -rf "$ASSETS"; mkdir -p "$ASSETS/env/bootstrap"
     cp -a "$ENV_DIR/pkg"     "$ASSETS/env/pkg"
     cp -a "$ENV_DIR/overlay" "$ASSETS/env/overlay"
 
     if [ "$arch" = "universal" ] || [ "$arch" = "arm64-v8a" ]; then
-        [ -f "$ENV_DIR/bootstrap/bootstrap.tar.gz" ] || build_bootstrap_tar
-        cp -f "$ENV_DIR/bootstrap/bootstrap.tar.gz" "$ASSETS/env/bootstrap/"
+        [ -f "$ENV_DIR/bootstrap/bootstrap.${ext}" ] || build_bootstrap_tar "$ext"
+        cp -f "$ENV_DIR/bootstrap/bootstrap.${ext}" "$ASSETS/env/bootstrap/"
     fi
     if [ "$arch" = "universal" ]; then
-        bootstrap_arm_has_node || build_bootstrap_arm_tar || true
-        [ -f "$ENV_DIR/bootstrap/bootstrap-arm.tar.gz" ] && cp -f "$ENV_DIR/bootstrap/bootstrap-arm.tar.gz" "$ASSETS/env/bootstrap/" || true
+        bootstrap_arm_has_node "$ext" || build_bootstrap_arm_tar "$ext" || true
+        [ -f "$ENV_DIR/bootstrap/bootstrap-arm.${ext}" ] && cp -f "$ENV_DIR/bootstrap/bootstrap-arm.${ext}" "$ASSETS/env/bootstrap/" || true
     elif [ "$arch" = "armeabi-v7a" ]; then
-        bootstrap_arm_has_node || build_bootstrap_arm_tar
-        cp -f "$ENV_DIR/bootstrap/bootstrap-arm.tar.gz" "$ASSETS/env/bootstrap/"
+        bootstrap_arm_has_node "$ext" || build_bootstrap_arm_tar "$ext"
+        cp -f "$ENV_DIR/bootstrap/bootstrap-arm.${ext}" "$ASSETS/env/bootstrap/"
     fi
 
     [ -f "$ENV_DIR/seed-packages.txt" ] && cp -f "$ENV_DIR/seed-packages.txt" "$ASSETS/env/seed-packages.txt" || true
     printf '%s\n' "$arch" > "$ASSETS/env/.target_arch"
     python3 "$ENV_DIR/scripts/make_manifest.py" "$ASSETS/env"
-    log "assets ($arch) -> $ASSETS"
+    log "assets ($arch, $ext) -> $ASSETS"
     find "$ASSETS" -maxdepth 3 | sed 's/^/  /' >&2
 }
 
@@ -122,11 +152,15 @@ done
 case "$ACTION" in
     bootstrap)
         arch="$(normalize_arch "$TARGET_ARCH")"
+        ext="tar.gz"
+        if can_use_zstd_for_arch "$arch"; then
+            ext="tar.zst"
+        fi
         if [ "$arch" = "universal" ] || [ "$arch" = "arm64-v8a" ]; then
-            build_bootstrap_tar
+            build_bootstrap_tar "$ext"
         fi
         if [ "$arch" = "universal" ] || [ "$arch" = "armeabi-v7a" ]; then
-            build_bootstrap_arm_tar
+            build_bootstrap_arm_tar "$ext"
         fi
         ;;
     assets)    pack_assets ;;

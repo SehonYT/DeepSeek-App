@@ -5,12 +5,51 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
+import shutil
+import subprocess
 import tarfile
 from pathlib import Path
 
 SCHEMA = 1
+
+
+def inspect_bootstrap_archive(path: Path) -> tuple[int, str | None]:
+    prepatched_pkg = None
+    symlink_count = 0
+    if path.name.endswith((".tar.zst", ".tzst")):
+        zstd_bin = shutil.which("zstd")
+        if not zstd_bin:
+            raise RuntimeError(f"zstd binary required to inspect {path}")
+        proc = subprocess.Popen([zstd_bin, "-d", "-c", str(path)], stdout=subprocess.PIPE)
+        try:
+            with tarfile.open(fileobj=proc.stdout, mode="r|") as archive:
+                for member in archive:
+                    if member.issym():
+                        symlink_count += 1
+                    elif member.isfile() and member.name.lstrip("./") == ".dsh-prepatched":
+                        f = archive.extractfile(member)
+                        if f:
+                            prepatched_pkg = f.read().decode("utf-8", errors="replace").strip() or None
+        finally:
+            if proc.stdout:
+                proc.stdout.close()
+            rc = proc.wait()
+            if rc != 0:
+                raise RuntimeError(f"zstd failed inspecting {path} (exit {rc})")
+        return symlink_count, prepatched_pkg
+
+    with tarfile.open(path, "r:gz") as archive:
+        for member in archive:
+            if member.issym():
+                symlink_count += 1
+            elif member.isfile() and member.name.lstrip("./") == ".dsh-prepatched":
+                f = archive.extractfile(member)
+                if f:
+                    prepatched_pkg = f.read().decode("utf-8", errors="replace").strip() or None
+    return symlink_count, prepatched_pkg
 
 
 def sha256_file(path: Path) -> str:
@@ -52,8 +91,12 @@ def read_seed_packages(root: Path) -> list[str]:
 
 
 def make_manifest(root: Path) -> dict:
-    bootstrap = root / "bootstrap" / "bootstrap.tar.gz"
-    bootstrap_arm = root / "bootstrap" / "bootstrap-arm.tar.gz"
+    bootstrap = root / "bootstrap" / "bootstrap.tar.zst"
+    if not bootstrap.is_file():
+        bootstrap = root / "bootstrap" / "bootstrap.tar.gz"
+    bootstrap_arm = root / "bootstrap" / "bootstrap-arm.tar.zst"
+    if not bootstrap_arm.is_file():
+        bootstrap_arm = root / "bootstrap" / "bootstrap-arm.tar.gz"
     overlay = root / "overlay"
     pkg = root / "pkg"
     for required in (overlay, pkg):
@@ -61,7 +104,7 @@ def make_manifest(root: Path) -> dict:
             raise FileNotFoundError(f"required env bundle input is missing: {required}")
     if not bootstrap.is_file() and not bootstrap_arm.is_file():
         raise FileNotFoundError(
-            f"required env bootstrap archive is missing: expected {bootstrap} or {bootstrap_arm}"
+            f"required env bootstrap archive is missing under {root / 'bootstrap'}"
         )
 
     identity = {
@@ -71,17 +114,21 @@ def make_manifest(root: Path) -> dict:
         "seedPackages": read_seed_packages(root),
     }
 
+    prepatched_pkg = None
     if bootstrap.is_file():
-        with tarfile.open(bootstrap, "r:gz") as archive:
-            symlink_count = sum(member.issym() for member in archive)
+        symlink_count, pkg_tag = inspect_bootstrap_archive(bootstrap)
         identity["bootstrapSha256"] = sha256_file(bootstrap)
         identity["bootstrapSymlinkCount"] = symlink_count
+        prepatched_pkg = prepatched_pkg or pkg_tag
 
     if bootstrap_arm.is_file():
-        with tarfile.open(bootstrap_arm, "r:gz") as archive:
-            arm_symlinks = sum(member.issym() for member in archive)
+        arm_symlinks, pkg_tag = inspect_bootstrap_archive(bootstrap_arm)
         identity["bootstrapArmSha256"] = sha256_file(bootstrap_arm)
         identity["bootstrapArmSymlinkCount"] = arm_symlinks
+        prepatched_pkg = prepatched_pkg or pkg_tag
+
+    if prepatched_pkg:
+        identity["prepatchedPackage"] = prepatched_pkg
 
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return {**identity, "bundleId": hashlib.sha256(canonical).hexdigest()}

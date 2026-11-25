@@ -18,7 +18,10 @@ env/packages/aarch64/
 # Archives and binaries
 *.tar
 *.tar.gz
+*.tar.zst
+*.tzst
 *.tar.xz
+app/src/main/jniLibs/
 *.bin
 *.idsig
 !env/bootstrap/bootstrap.tar.gz

@@ -18,8 +18,10 @@ public final class EnvPaths {
     public static final String USER_DATA_DIR = ".gemini";
 
     public static final String ASSET_BOOTSTRAP = "env/bootstrap/bootstrap.tar.gz";
+    public static final String ASSET_BOOTSTRAP_ZST = "env/bootstrap/bootstrap.tar.zst";
     public static final String ASSET_BOOTSTRAP_PLAIN = "env/bootstrap/bootstrap.tar";
     public static final String ASSET_BOOTSTRAP_ARM = "env/bootstrap/bootstrap-arm.tar.gz";
+    public static final String ASSET_BOOTSTRAP_ARM_ZST = "env/bootstrap/bootstrap-arm.tar.zst";
     public static final String ASSET_MANIFEST = "env/manifest.json";
     public static final String ASSET_OVERLAY = "env/overlay";
     public static final String ASSET_PKG = "env/pkg";

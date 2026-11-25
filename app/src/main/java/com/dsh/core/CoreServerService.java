@@ -34,6 +34,7 @@ public final class CoreServerService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        BootMetrics.markServiceStart();
         runtime = new RuntimeManager(this);
         logBuffer = new com.dsh.log.LogRingBuffer();
         gatewayServer = new com.dsh.gateway.SystemGatewayServer(this, logBuffer, com.dsh.BuildConfig.GATEWAY_PORT);

@@ -47,11 +47,50 @@ public final class EnvInstaller {
         if (!basic) {
             return false;
         }
-        if (is32BitUserspace() && !bashSmokeTest(context, prefix)) {
+        if (is32BitUserspace() && !hasSmokeMarker(context, prefix) && !bashSmokeTest(context, prefix)) {
             Log.w(TAG, "installed prefix bash failed smoke test on 32-bit userspace; forcing reinstall with ARM bootstrap");
             return false;
         }
         return true;
+    }
+
+    public static String readInstalledBundleId(Context context) {
+        File prefix = prefix(context);
+        Properties state = readState(new File(prefix, EnvPaths.MARKER));
+        return state.getProperty("bundle_id", "");
+    }
+
+    public static String readBundledBundleId(Context context) {
+        try {
+            return EnvBundleManifest.load(context.getAssets()).bundleId;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static boolean hasSmokeMarker(Context context, File prefix) {
+        File smoke = new File(prefix, ".smoke-ok");
+        if (!smoke.isFile()) {
+            return false;
+        }
+        String bundleId = readInstalledBundleId(context);
+        if (bundleId.isEmpty()) {
+            return false;
+        }
+        try {
+            String content = com.dsh.util.IoUtil.readAll(new FileInputStream(smoke), "UTF-8").trim();
+            return (bundleId + ":" + context.getPackageName()).equals(content);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static void writeSmokeMarker(Context context, File prefix, String bundleId) {
+        try {
+            AtomicFileWriter.writeText(new File(prefix, ".smoke-ok"),
+                    bundleId + ":" + context.getPackageName() + "\n");
+        } catch (Exception ignored) {
+        }
     }
 
     /** @return true when the prefix was built in this call. */
@@ -68,9 +107,12 @@ public final class EnvInstaller {
         validatePrefixLocation(ctx, prefix);
 
         EnvBundleManifest manifest = EnvBundleManifest.load(assets);
+        boolean hasZstd = TarExtractor.findZstdBinary(ctx) != null;
         String bootstrapAsset;
         if (is32BitUserspace()) {
-            bootstrapAsset = AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP_ARM);
+            bootstrapAsset = hasZstd
+                    ? AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP_ARM_ZST, EnvPaths.ASSET_BOOTSTRAP_ARM)
+                    : AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP_ARM);
             if (bootstrapAsset == null) {
                 throw new IllegalStateException(
                         "32-bit device requires armeabi-v7a or universal APK (missing "
@@ -78,14 +120,18 @@ public final class EnvInstaller {
             }
             Log.i(TAG, "32-bit Android userspace detected without linker64; using 32-bit ARM bootstrap: " + bootstrapAsset);
         } else {
-            bootstrapAsset = AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP, EnvPaths.ASSET_BOOTSTRAP_PLAIN);
+            bootstrapAsset = hasZstd
+                    ? AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP_ZST, EnvPaths.ASSET_BOOTSTRAP, EnvPaths.ASSET_BOOTSTRAP_PLAIN)
+                    : AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP, EnvPaths.ASSET_BOOTSTRAP_PLAIN);
             if (bootstrapAsset == null) {
                 // Allow running an armeabi-v7a APK on a 64-bit device if it supports 32-bit ABIs.
                 boolean supports32Bit = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.LOLLIPOP
                         || (android.os.Build.SUPPORTED_32_BIT_ABIS != null
                         && android.os.Build.SUPPORTED_32_BIT_ABIS.length > 0);
                 if (supports32Bit) {
-                    bootstrapAsset = AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP_ARM);
+                    bootstrapAsset = hasZstd
+                            ? AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP_ARM_ZST, EnvPaths.ASSET_BOOTSTRAP_ARM)
+                            : AssetPicker.pick(assets, EnvPaths.ASSET_BOOTSTRAP_ARM);
                 }
                 if (bootstrapAsset == null) {
                     throw new IllegalStateException("required bootstrap asset missing for this device ABI");
@@ -129,14 +175,15 @@ public final class EnvInstaller {
                 throw new IOException("cannot create staging prefix: " + stage);
             }
             String targetPrefix = prefix.getAbsolutePath();
-            boolean isArm = EnvPaths.ASSET_BOOTSTRAP_ARM.equals(bootstrapAsset);
+            boolean isArm = EnvPaths.ASSET_BOOTSTRAP_ARM.equals(bootstrapAsset)
+                    || EnvPaths.ASSET_BOOTSTRAP_ARM_ZST.equals(bootstrapAsset);
             String expectedSha = manifest.expectedBootstrapSha256(isArm);
             int expectedSymlinks = manifest.expectedSymlinkCount(isArm);
-            BootstrapExtractor.extract(assets, bootstrapAsset, stage,
+            BootstrapExtractor.extract(context, assets, bootstrapAsset, stage,
                     expectedSha, expectedSymlinks);
             OverlayCopier.overlay(assets, EnvPaths.ASSET_OVERLAY, stage);
             PkgInstaller.install(assets, stage, targetPrefix);
-            prepareTree(assets, stage, targetPrefix);
+            prepareTree(context, assets, stage, targetPrefix, manifest);
             writeMarker(stage, manifest, expectedSha,
                     expectedSha, false, targetPrefix);
             validateTree(stage, expectedSymlinks);
@@ -165,6 +212,7 @@ public final class EnvInstaller {
                 restoreQuarantine(prefix, quarantined);
                 throw new IOException("installed bash failed its smoke test; prefix preserved for diagnosis");
             }
+            writeSmokeMarker(context, prefix, manifest.bundleId);
             Log.i(TAG, "env prefix installed atomically: " + prefix
                     + " bundle=" + manifest.bundleId);
         } catch (Exception e) {
@@ -193,7 +241,8 @@ public final class EnvInstaller {
         // A full bootstrap replacement can overwrite package-managed/user edits.
         // Preserve legacy/mutable prefixes and report the pending base migration
         // instead of silently deleting or rebasing their contents.
-        boolean isArm = EnvPaths.ASSET_BOOTSTRAP_ARM.equals(bootstrapAsset);
+        boolean isArm = EnvPaths.ASSET_BOOTSTRAP_ARM.equals(bootstrapAsset)
+                || EnvPaths.ASSET_BOOTSTRAP_ARM_ZST.equals(bootstrapAsset);
         String targetBootstrapSha = manifest.expectedBootstrapSha256(isArm);
         boolean bootstrapKnown = oldBootstrap != null && !"legacy".equals(oldBootstrap);
         boolean bootstrapMatches = targetBootstrapSha != null && targetBootstrapSha.equals(oldBootstrap);
@@ -241,11 +290,18 @@ public final class EnvInstaller {
                 + " bootstrap=" + (bootstrapPending ? "pending" : "current"));
     }
 
-    private static void prepareTree(AssetManager assets, File root, String targetPrefix) {
-        // Repair every path representation before anything can execute from the prefix.
-        TermuxSymlinkFixer.fix(root, targetPrefix);
-        TermuxShebangRewriter.rewrite(root, targetPrefix);
-        TermuxPrefixRewriter.rewrite(root, targetPrefix);
+    private static void prepareTree(Context context, AssetManager assets, File root,
+                                    String targetPrefix, EnvBundleManifest manifest) {
+        boolean prepatched = isPrepatchedForTarget(context, root, targetPrefix, manifest);
+        if (prepatched) {
+            Log.i(TAG, "bootstrap pre-patched for " + targetPrefix + "; skipping runtime tree rewrite");
+        } else {
+            // Repair every path representation before anything can execute from the prefix.
+            TermuxSymlinkFixer.fix(root, targetPrefix);
+            TermuxShebangRewriter.rewrite(root, targetPrefix);
+            TermuxPrefixRewriter.rewrite(root, targetPrefix);
+        }
+        // Only ensure overlay/pkg scripts have exec bits (tar extraction already set inline modes).
         FileModeUtil.recursiveSetExec(new File(root, "bin"));
         FileModeUtil.setExec(new File(root, "libexec/pkg/pkg"));
         File fixPaths = new File(root, EnvPaths.FIX_PATHS_REL);
@@ -254,6 +310,30 @@ public final class EnvInstaller {
         }
         BusInstaller.install(assets, root);
         TermuxHooksRemover.remove(root);
+    }
+
+    private static boolean isPrepatchedForTarget(Context context, File root, String targetPrefix,
+                                                 EnvBundleManifest manifest) {
+        if (context == null || manifest == null) {
+            return false;
+        }
+        String pkg = context.getPackageName();
+        String expectedPrefix = "/data/user/0/" + pkg + "/files/" + EnvPaths.PREFIX_DIR;
+        if (!expectedPrefix.equals(targetPrefix)) {
+            return false;
+        }
+        if (pkg.equals(manifest.prepatchedPackage)) {
+            return true;
+        }
+        File prepatchedMarker = new File(root, ".dsh-prepatched");
+        if (prepatchedMarker.isFile()) {
+            try {
+                String bakedPkg = com.dsh.util.IoUtil.readAll(new FileInputStream(prepatchedMarker), "UTF-8").trim();
+                return pkg.equals(bakedPkg);
+            } catch (Exception ignored) {
+            }
+        }
+        return false;
     }
 
     private static void validateTree(File prefix, int minimumSymlinks) {

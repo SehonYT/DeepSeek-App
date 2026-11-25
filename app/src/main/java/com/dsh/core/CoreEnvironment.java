@@ -118,6 +118,8 @@ public final class CoreEnvironment {
         env.put("DSH_DEVICE_TIER", profile.tier.id);
         env.put("DSH_SOC_FAMILY", profile.socFamily);
         env.put("DSH_TARGET_ARCH", com.dsh.BuildConfig.TARGET_ARCH);
+        env.put("DSH_FORK_WALL_MS", String.valueOf(System.currentTimeMillis()));
+        configureNodeCompileCache(rm.appContext(), profile.is32Bit, env);
         Log.i(TAG, "device profile: tier=" + profile.tier.id
                 + " soc=" + profile.socFamily
                 + " 32bit=" + profile.is32Bit
@@ -161,6 +163,73 @@ public final class CoreEnvironment {
             env.put("LD_LIBRARY_PATH", prefixLib.getAbsolutePath());
         }
         env.remove("LD_PRELOAD");
+    }
+
+    private static void configureNodeCompileCache(Context context, boolean is32Bit, Map<String, String> env) {
+        if (context == null || env.containsKey("NODE_COMPILE_CACHE")) {
+            return;
+        }
+        try {
+            File noBackup = context.getNoBackupFilesDir();
+            String envId = com.dsh.install.EnvInstaller.readBundledBundleId(context);
+            if (envId.isEmpty()) {
+                envId = com.dsh.install.EnvInstaller.readInstalledBundleId(context);
+            }
+            String coreHash = com.dsh.runtime.CoreInstaller.getExpectedRuntimeHash(context);
+            String envPart = envId.length() > 12 ? envId.substring(0, 12) : (envId.isEmpty() ? "0" : envId);
+            String corePart = coreHash.length() > 12 ? coreHash.substring(0, 12) : (coreHash.isEmpty() ? "0" : coreHash);
+            String cacheName = "v8-cache-" + (is32Bit ? "arm32" : "arm64") + "-" + envPart + "-" + corePart;
+            File cacheDir = new File(noBackup, cacheName);
+            if (!cacheDir.isDirectory()) {
+                cacheDir.mkdirs();
+            }
+            env.put("NODE_COMPILE_CACHE", cacheDir.getAbsolutePath());
+            pruneStaleCompileCachesAsync(noBackup, cacheName);
+        } catch (Throwable t) {
+            Log.w(TAG, "cannot configure NODE_COMPILE_CACHE: " + t.getMessage());
+        }
+    }
+
+    private static void pruneStaleCompileCachesAsync(File noBackup, String activeName) {
+        File[] children = noBackup.listFiles();
+        if (children == null) {
+            return;
+        }
+        boolean hasStale = false;
+        for (File child : children) {
+            if (child.isDirectory() && child.getName().startsWith("v8-cache-")
+                    && !activeName.equals(child.getName())) {
+                hasStale = true;
+                break;
+            }
+        }
+        if (!hasStale) {
+            return;
+        }
+        Thread cleaner = new Thread(() -> {
+            for (File child : children) {
+                if (child.isDirectory() && child.getName().startsWith("v8-cache-")
+                        && !activeName.equals(child.getName())) {
+                    deleteDirQuietly(child);
+                }
+            }
+        }, "V8CachePruner");
+        cleaner.setDaemon(true);
+        cleaner.start();
+    }
+
+    private static void deleteDirQuietly(File dir) {
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File f : files) {
+                if (f.isDirectory()) {
+                    deleteDirQuietly(f);
+                } else {
+                    f.delete();
+                }
+            }
+        }
+        dir.delete();
     }
 
     /**

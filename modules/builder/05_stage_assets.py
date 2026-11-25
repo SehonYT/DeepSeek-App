@@ -36,7 +36,10 @@ def stage_assets(staging_dir):
     if os.path.isfile(arch_file):
         with open(arch_file, "r", encoding="utf-8") as f:
             staged_arch = f.read().strip()
-    if not os.path.isfile(manifest_file) or staged_arch != target_arch:
+    want_zst = bool(shutil.which("zstd") and prepare_runtime.has_zstd_jni(target_arch))
+    bs_dir = os.path.join(env_src, "bootstrap")
+    has_zst_bs = os.path.isdir(bs_dir) and any(fn.endswith(".tar.zst") for fn in os.listdir(bs_dir))
+    if not os.path.isfile(manifest_file) or staged_arch != target_arch or (want_zst != has_zst_bs):
         print(f"[*] Rebuilding env assets for TARGET_ARCH={target_arch}...")
         env_cmd_env = os.environ.copy()
         env_cmd_env["TARGET_ARCH"] = target_arch
