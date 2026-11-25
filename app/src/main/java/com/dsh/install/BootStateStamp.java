@@ -33,7 +33,17 @@ public final class BootStateStamp {
                     .getPackageInfo(context.getPackageName(), 0).lastUpdateTime;
         } catch (Exception ignored) {
         }
-        String abi = EnvInstaller.is32BitUserspace() ? "arm32" : "arm64";
+        // Key on the actual ABI family, not a 32/64 boolean: otherwise an arm64
+        // and an x86_64 install (or arm32 vs x86) would reuse each other's stamp
+        // and skip the userspace install entirely.
+        String abi;
+        switch (EnvInstaller.deviceArch()) {
+            case ARM64: abi = "arm64"; break;
+            case ARM32: abi = "arm32"; break;
+            case X86_64: abi = "x86_64"; break;
+            case X86:
+            default: abi = "x86"; break;
+        }
         return "schema=" + SCHEMA
                 + "|pkg=" + context.getPackageName()
                 + "|ver=" + com.dsh.BuildConfig.APP_VERSION_CODE
