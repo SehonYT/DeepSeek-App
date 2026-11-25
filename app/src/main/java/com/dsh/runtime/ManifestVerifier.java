@@ -17,6 +17,33 @@ public final class ManifestVerifier {
     private ManifestVerifier() {
     }
 
+    /**
+     * True for manifest entries that describe the *archives* staged in
+     * assets/runtime, not files extracted from them.
+     *
+     * The runtime ships a single packed archive (dsh.tar.gz or, since the zstd
+     * work, dsh.tar.zst). CoreInstaller extracts its CONTENTS into
+     * runtime/dsh, so the archive itself never exists under runtimeDir.
+     * Verifying it as an extracted file made every zstd build fail closed with
+     * "missing runtime file: dsh.tar.zst" even though the runtime was fine.
+     */
+    private static boolean isAssetOnly(String relative) {
+        if (relative.endsWith("manifest.json")) {
+            return true;
+        }
+        String name = relative;
+        int slash = name.lastIndexOf('/');
+        if (slash >= 0) {
+            name = name.substring(slash + 1);
+        }
+        // Any packed runtime archive, whatever compression we ship.
+        if (name.equals("dsh.tar") || name.startsWith("dsh.tar.")
+                || name.equals("seed.tar") || name.startsWith("seed.tar.")) {
+            return true;
+        }
+        return false;
+    }
+
     /** Returns null on success, or a human-readable reason on the first failure. */
     public static String verifyError(Context appContext, File runtimeDir) {
         try (InputStream raw = appContext.getAssets().open(RuntimePaths.MANIFEST_ASSET)) {
@@ -28,7 +55,7 @@ public final class ManifestVerifier {
             Iterator<String> keys = files.keys();
             while (keys.hasNext()) {
                 String relative = keys.next();
-                if (relative.endsWith("manifest.json") || relative.endsWith("dsh.tar.gz")) {
+                if (isAssetOnly(relative)) {
                     continue;
                 }
                 String expected = files.optString(relative, null);

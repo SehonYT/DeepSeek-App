@@ -293,8 +293,11 @@ public final class EnvInstaller {
     private static void updateManagedLayers(Context context, AssetManager assets, File prefix,
                                             String bootstrapAsset, EnvBundleManifest manifest) {
         File nodeBin = new File(prefix, "bin/node");
-        File sqliteLib = new File(prefix, "lib/libsqlite3.so");
-        if (!nodeBin.isFile() || !sqliteLib.exists()) {
+        // Match isInstalled(): the ARM bundle resolves libsqlite3 to a versioned
+        // soname, so a bare exists() on the unversioned symlink would report the
+        // prefix as broken and force a full reinstall on every launch.
+        boolean sqliteOk = hasLibrary(new File(prefix, "lib"), "libsqlite3.so");
+        if (!nodeBin.isFile() || !sqliteOk) {
             Log.w(TAG, "existing prefix lacks node or libsqlite3; forcing fresh install for DeepSeek...");
             installFresh(context, assets, prefix, bootstrapAsset, manifest);
             return;
