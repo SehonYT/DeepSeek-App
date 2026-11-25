@@ -15,6 +15,8 @@ from pathlib import Path
 
 EM_ARM = 40
 EM_AARCH64 = 183
+EM_386 = 3
+EM_X86_64 = 62
 
 
 def elf_info(data: bytes) -> tuple[int, int] | None:
@@ -89,6 +91,8 @@ def verify_apk(apk_path: Path, arch: str) -> int:
             "assets/env/bootstrap/bootstrap-arm.tar.zst" in names
             or "assets/env/bootstrap/bootstrap-arm.tar.gz" in names
         )
+        has_x86_bs = "assets/env/bootstrap/bootstrap-x86.tar.gz" in names
+        has_x64_bs = "assets/env/bootstrap/bootstrap-x86_64.tar.gz" in names
 
         for name in sorted(names):
             if name.startswith("lib/"):
@@ -104,6 +108,8 @@ def verify_apk(apk_path: Path, arch: str) -> int:
                 "assets/env/bootstrap/bootstrap.tar.zst",
                 "assets/env/bootstrap/bootstrap-arm.tar.gz",
                 "assets/env/bootstrap/bootstrap-arm.tar.zst",
+                "assets/env/bootstrap/bootstrap-x86.tar.gz",
+                "assets/env/bootstrap/bootstrap-x86_64.tar.gz",
                 "assets/runtime/dsh.tar.gz",
                 "assets/runtime/dsh.tar.zst",
             ):
@@ -117,6 +123,8 @@ def verify_apk(apk_path: Path, arch: str) -> int:
     all_elfs = elfs + jni_elfs
     arm32_count = sum(1 for _, cls, mach in all_elfs if cls == 1 and mach == EM_ARM)
     arm64_count = sum(1 for _, cls, mach in all_elfs if cls == 2 and mach == EM_AARCH64)
+    x86_count = sum(1 for _, cls, mach in all_elfs if cls == 1 and mach == EM_386)
+    x64_count = sum(1 for _, cls, mach in all_elfs if cls == 2 and mach == EM_X86_64)
     print(f"[verify_apk_abi] {apk_path.name} ({arch}): arm32_elfs={arm32_count}, arm64_elfs={arm64_count}, jni={len(jni_elfs)}")
 
     if arch == "armeabi-v7a":
@@ -138,11 +146,36 @@ def verify_apk(apk_path: Path, arch: str) -> int:
             raise SystemExit(f"FAIL: 32-bit ELFs found in arm64-v8a APK: {bad}")
         if arm64_count == 0:
             raise SystemExit("FAIL: no 64-bit ARM ELFs found in arm64-v8a APK")
+    elif arch == "x86":
+        if not has_x86_bs:
+            raise SystemExit("FAIL: x86 APK must contain assets/env/bootstrap/bootstrap-x86.tar.gz")
+        if has_arm64_bs or has_arm32_bs or has_x64_bs:
+            raise SystemExit("FAIL: x86 APK must not bundle other ABIs' userspaces")
+        if x86_count == 0:
+            raise SystemExit("FAIL: no i386 ELFs found in x86 APK")
+        node_ok = any(p.endswith("bin/node") and c == 1 and m == EM_386 for p, c, m in elfs)
+        if not node_ok:
+            raise SystemExit("FAIL: i386 bin/node missing from x86 APK")
+    elif arch == "x86_64":
+        if not has_x64_bs:
+            raise SystemExit("FAIL: x86_64 APK must contain assets/env/bootstrap/bootstrap-x86_64.tar.gz")
+        if has_arm64_bs or has_arm32_bs or has_x86_bs:
+            raise SystemExit("FAIL: x86_64 APK must not bundle other ABIs' userspaces")
+        if x64_count == 0:
+            raise SystemExit("FAIL: no x86-64 ELFs found in x86_64 APK")
+        node_ok = any(p.endswith("bin/node") and c == 2 and m == EM_X86_64 for p, c, m in elfs)
+        if not node_ok:
+            raise SystemExit("FAIL: x86-64 bin/node missing from x86_64 APK")
     elif arch == "universal":
-        if not (has_arm64_bs and has_arm32_bs):
-            raise SystemExit(f"FAIL: universal APK must contain both bootstraps (arm32={has_arm32_bs}, arm64={has_arm64_bs})")
+        # The universal APK installs everywhere, so it must carry every userspace.
+        missing_bs = [n for n, ok in (("arm64", has_arm64_bs), ("arm32", has_arm32_bs),
+                                      ("x86", has_x86_bs), ("x86_64", has_x64_bs)) if not ok]
+        if missing_bs:
+            raise SystemExit(f"FAIL: universal APK missing userspaces: {missing_bs}")
         if arm32_count == 0 or arm64_count == 0:
-            raise SystemExit("FAIL: universal APK missing either 32-bit or 64-bit ELFs")
+            raise SystemExit("FAIL: universal APK missing either 32-bit or 64-bit ARM ELFs")
+        if x86_count == 0 or x64_count == 0:
+            raise SystemExit("FAIL: universal APK missing either x86 or x86_64 ELFs")
 
     print(f"[OK] {apk_path.name} passed ABI verification ({arch})")
     return 0
@@ -151,7 +184,7 @@ def verify_apk(apk_path: Path, arch: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("apk", type=Path)
-    parser.add_argument("--arch", required=True, choices=["universal", "arm64-v8a", "armeabi-v7a"])
+    parser.add_argument("--arch", required=True, choices=["universal", "arm64-v8a", "armeabi-v7a", "x86", "x86_64"])
     args = parser.parse_args()
     return verify_apk(args.apk, args.arch)
 
