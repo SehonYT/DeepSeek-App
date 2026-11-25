@@ -4,8 +4,6 @@ import android.content.Context;
 import android.content.res.AssetManager;
 import android.util.Log;
 
-import com.dsh.util.IoUtil;
-
 import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.IOException;
@@ -90,36 +88,6 @@ public final class BootstrapExtractor {
         }
         if (expectedSymlinkCount > 0 && !TextFileDetector.isSymlink(sh)) {
             throw new IOException("bootstrap bin/sh symlink was not preserved");
-        }
-    }
-
-    private static int countSymlinks(File dir) {
-        File[] children = dir.listFiles();
-        if (children == null) {
-            return 0;
-        }
-        int count = 0;
-        for (File child : children) {
-            if (TextFileDetector.isSymlink(child)) {
-                count++;
-            } else if (child.isDirectory()) {
-                count += countSymlinks(child);
-            }
-        }
-        return count;
-    }
-
-    private static boolean isGzip(File file) {
-        if (file == null || !file.isFile() || file.length() < 2) {
-            return false;
-        }
-        try (InputStream in = new FileInputStream(file)) {
-            int b0 = in.read();
-            int b1 = in.read();
-            return b0 == 0x1f && b1 == 0x8b;
-        } catch (IOException e) {
-            Log.w(TAG, "cannot read magic of " + file + ": " + e);
-            return false;
         }
     }
 }
