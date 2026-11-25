@@ -64,15 +64,17 @@ public final class OnboardingSeeder {
             }
 
             File bashrc = new File(homeDir, ".bashrc");
-            String bashrcContent = "# DeepSeek Interactive Bash Config\n"
-                    + "export PS1='\\[\\e[0;32m\\]\\w\\[\\e[0m\\] \\$ '\n"
-                    + "if [ -n \"$PREFIX\" ] && [ -f \"$PREFIX/etc/bash.bashrc\" ]; then\n"
-                    + "    . \"$PREFIX/etc/bash.bashrc\"\n"
-                    + "elif [ -f \"$HOME/usr/etc/bash.bashrc\" ]; then\n"
-                    + "    . \"$HOME/usr/etc/bash.bashrc\"\n"
-                    + "fi\n"
-                    + "export PS1='\\[\\e[0;32m\\]\\w\\[\\e[0m\\] \\$ '\n";
-            AtomicFileWriter.writeText(bashrc, bashrcContent);
+            if (!bashrc.isFile() || bashrc.length() == 0) {
+                String bashrcContent = "# DeepSeek Interactive Bash Config\n"
+                        + "export PS1='\\[\\e[0;32m\\]\\w\\[\\e[0m\\] \\$ '\n"
+                        + "if [ -n \"$PREFIX\" ] && [ -f \"$PREFIX/etc/bash.bashrc\" ]; then\n"
+                        + "    . \"$PREFIX/etc/bash.bashrc\"\n"
+                        + "elif [ -f \"$HOME/usr/etc/bash.bashrc\" ]; then\n"
+                        + "    . \"$HOME/usr/etc/bash.bashrc\"\n"
+                        + "fi\n"
+                        + "export PS1='\\[\\e[0;32m\\]\\w\\[\\e[0m\\] \\$ '\n";
+                AtomicFileWriter.writeText(bashrc, bashrcContent);
+            }
 
             File wsDir = new File(homeDir, "workspace");
             if (!wsDir.exists()) {
@@ -83,17 +85,19 @@ public final class OnboardingSeeder {
         }
     }
 
-    private static void seedStateFile(Context appContext, String assetName, File target)
-            throws Exception {
+    private static void seedStateFile(Context appContext, String assetName, File target) {
         if (target.isFile() && target.length() > 0) {
-            Log.i(TAG, "state present; left untouched: " + target);
             return;
         }
         try (InputStream in = appContext.getAssets().open(
                 RuntimePaths.SEED_ASSET + "/" + assetName)) {
             String content = com.dsh.util.IoUtil.readAll(in, "UTF-8");
             AtomicFileWriter.writeText(target, content);
+            Log.i(TAG, "seeded onboarding state (was missing): " + target);
+        } catch (java.io.FileNotFoundException ignored) {
+            // Optional seed asset not bundled in DeepSeek-App.
+        } catch (Exception e) {
+            Log.w(TAG, "failed seeding optional asset " + assetName + ": " + e.getMessage());
         }
-        Log.i(TAG, "seeded onboarding state (was missing): " + target);
     }
 }

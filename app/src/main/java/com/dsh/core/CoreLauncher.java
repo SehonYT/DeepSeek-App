@@ -51,8 +51,10 @@ public final class CoreLauncher {
                     n = fis.read(buf);
                 }
                 if (n > 0) {
-                    String cmdline = new String(buf, 0, n);
-                    if (cmdline.contains("dsh") || (cmdline.contains("node") && cmdline.contains("cli"))) {
+                    String cmdline = new String(buf, 0, n).replace('\0', ' ');
+                    boolean isDshCore = (cmdline.contains("runtime/dsh") || cmdline.contains("apps/cli/lib/bin.js"))
+                            && cmdline.contains("--profile");
+                    if (isDshCore) {
                         Log.w(TAG, "Terminating orphan DeepSeek process (PID " + pid + ")");
                         android.os.Process.sendSignal(pid, android.os.Process.SIGNAL_KILL);
                         killedAny = true;
@@ -81,28 +83,10 @@ public final class CoreLauncher {
         // 3. Extract DeepSeek runtime bundle
         runtime.installCore();
 
-        // 4. Background env sync & toolchain updates if any
-        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                runtime.installEnvInBackground();
-            }
-        }, 3500);
-
-        // 5. Launch DeepSeek process
+        // 4. Launch DeepSeek process immediately without competing background env sync;
+        // CoreProcessSupervisor triggers runtime.installEnvInBackground() once the core is ready.
         ProcessBuilder pb = new ProcessBuilder(runtime.coreCommand());
         pb.directory(filesDir);
-        File logsDir = new File(filesDir, "logs");
-        logsDir.mkdirs();
-        File stderrLog = new File(logsDir, "core_stderr.log");
-        if (stderrLog.exists()) {
-            stderrLog.delete();
-        }
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            pb.redirectError(ProcessBuilder.Redirect.to(stderrLog));
-        } else {
-            pb.redirectErrorStream(true);
-        }
         runtime.applyEnvironment(pb);
         Log.i(TAG, "Starting DeepSeek process: " + Arrays.toString(runtime.coreCommand()));
         return pb.start();

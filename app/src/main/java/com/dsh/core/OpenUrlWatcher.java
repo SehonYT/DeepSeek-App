@@ -78,17 +78,25 @@ public final class OpenUrlWatcher {
         if (line == null) {
             return;
         }
-        if (line.contains("dsh web:") || line.contains("http://127.0.0.1:")) {
+        int port = CoreRuntimeState.httpsPort;
+        String expectedPrefix = "http://127.0.0.1:" + port;
+        if (line.contains("dsh web:") || line.contains(expectedPrefix)) {
             Matcher m = URL_PATTERN.matcher(line);
             if (m.find()) {
                 String candidate = m.group();
-                Log.i(TAG, "detected DeepSeek Web URL: " + SensitiveDataRedactor.safeUrl(candidate));
-                CoreRuntimeState.serverUrl = candidate;
-                CoreRuntimeState.readyGeneration++;
-                if (MainActivity.activeActivity != null) {
-                    MainActivity.activeActivity.loadDeepSeekUrl(candidate);
+                if (candidate.startsWith(expectedPrefix)) {
+                    Log.i(TAG, "detected DeepSeek Web URL: " + SensitiveDataRedactor.safeUrl(candidate));
+                    CoreRuntimeState.detectedWebUrl = candidate;
+                    String current = CoreRuntimeState.serverUrl;
+                    if (current != null && !candidate.equals(current)) {
+                        CoreRuntimeState.serverUrl = candidate;
+                        CoreRuntimeState.readyGeneration++;
+                        if (MainActivity.activeActivity != null) {
+                            MainActivity.activeActivity.loadDeepSeekUrl(candidate);
+                        }
+                    }
+                    return;
                 }
-                return;
             }
         }
         for (String prefix : new String[]{"DSH_OPEN_URL=", "DEEPSEEK_OPEN_URL=", "AGY_OPEN_URL=", "ANTIGRAVITY_OPEN_URL:", "ANTIGRAVITY_OPEN_URL="}) {

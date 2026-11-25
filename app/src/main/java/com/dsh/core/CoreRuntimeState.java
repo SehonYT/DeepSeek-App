@@ -10,6 +10,8 @@ public final class CoreRuntimeState {
 
     /** Published once the core answers on its loopback port. */
     public static volatile String serverUrl = null;
+    /** Exact tokenized web URL emitted on stdout by `dsh web` (e.g. http://127.0.0.1:45257/?token=...). */
+    public static volatile String detectedWebUrl = null;
     public static volatile int httpsPort = RuntimeConfig.DEFAULT_HTTPS_PORT;
     public static volatile String csrfToken = null;
 

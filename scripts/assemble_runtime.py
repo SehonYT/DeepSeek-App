@@ -66,8 +66,8 @@ def assemble_bundle(source_repo: str, out_archive: str):
         ".json", ".yml", ".yaml", ".sql", ".txt", ".html", ".css", ".svg", ".png", ".ico", ".md"
     )
     for root, dirs, files in os.walk(source_repo):
-        # Skip node_modules, git, tests, benchmarks, and TypeScript source dirs (and root docs)
-        skip_dirs = ["node_modules", ".git", "tests", "benchmarks", "src"]
+        # Skip node_modules, git, tests, benchmarks, agent notes, and TypeScript source dirs
+        skip_dirs = ["node_modules", ".git", ".github", ".agents", "tests", "benchmarks", "src"]
         if root == source_repo:
             skip_dirs.append("docs")
         dirs[:] = [d for d in dirs if d not in skip_dirs]
@@ -335,7 +335,7 @@ module.exports.default = module.exports;
                 shutil.rmtree(os.path.join(root, d), ignore_errors=True)
         for f in files:
             # Preserve .md (README, plugin details, docs) and .d.ts
-            if f.endswith((".ts", ".map", ".test.js", ".spec.js")) and not f.endswith(".d.ts"):
+            if f.endswith((".ts", ".map", ".test.js", ".spec.js", ".tsbuildinfo")) and not f.endswith(".d.ts"):
                 try:
                     os.remove(os.path.join(root, f))
                 except Exception:

@@ -45,8 +45,11 @@ public final class CoreInstaller {
         } catch (Exception ignored) {
         }
         String manifestHash = getAssetManifestHash(ctx);
-        String expectedHash = (manifestHash != null ? manifestHash : "") + ":" + com.dsh.BuildConfig.APP_VERSION_CODE + ":" + lastUpdate;
-        boolean upToDate = isRuntimeUpToDate(rm, expectedHash);
+        String expectedHash = (manifestHash != null && !manifestHash.isEmpty())
+                ? manifestHash
+                : (com.dsh.BuildConfig.APP_VERSION_CODE + ":" + lastUpdate);
+        boolean upToDate = isRuntimeUpToDate(rm, expectedHash)
+                && new File(runtimeDir, "dsh/apps/cli/lib/bin.js").isFile();
 
         if (!upToDate) {
             Log.i(TAG, "extracting assets/runtime (first launch or runtime update)");

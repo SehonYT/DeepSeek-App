@@ -29,6 +29,7 @@ public final class CoreServerService extends Service {
     private com.dsh.gateway.SystemGatewayServer gatewayServer;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private volatile boolean destroyed;
+    private volatile boolean daemonStarted = false;
 
     @Override
     public void onCreate() {
@@ -47,6 +48,7 @@ public final class CoreServerService extends Service {
         CoreRuntimeState.restarting = false;
         CoreRuntimeState.lastError = null;
         CoreRuntimeState.serverUrl = null;
+        CoreRuntimeState.detectedWebUrl = null;
 
         ForegroundNotification.start(this);
         wakeLock = new WakeLockHolder();
@@ -56,49 +58,123 @@ public final class CoreServerService extends Service {
         openUrlWatcher.start();
 
         supervisor = new CoreProcessSupervisor(this, runtime, openUrlWatcher, logBuffer,
+                this::onCoreReady,
                 this::onSupervisorTerminated);
         supervisor.start();
+    }
 
+    private synchronized void onCoreReady() {
+        if (destroyed || daemonStarted) {
+            return;
+        }
+        daemonStarted = true;
         startBackgroundDaemon();
+    }
+
+    private void applyDaemonEnvironment(ProcessBuilder pb) {
+        String files = getFilesDir().getAbsolutePath();
+        String prefix = files + "/usr";
+        java.util.Map<String, String> env = pb.environment();
+        env.put("HOME", files);
+        env.put("PREFIX", prefix);
+        env.put("TMPDIR", getCacheDir().getAbsolutePath());
+        env.put("LD_LIBRARY_PATH", prefix + "/lib");
+        String sysPath = System.getenv("PATH");
+        env.put("PATH", files + "/runtime/bin:" + prefix + "/bin:/system/bin" + (sysPath != null ? ":" + sysPath : ""));
+        env.put("DSH_HOME", files + "/.dsh");
+        env.put("AGY_APPLICATION_ID", getPackageName());
+    }
+
+    private File resolveDaemonBin() {
+        File dshDaemon = new File(getFilesDir(), "usr/bin/dsh-daemon");
+        if (dshDaemon.isFile()) {
+            return dshDaemon;
+        }
+        File legacyDaemon = new File(getFilesDir(), "usr/bin/agy-daemon");
+        return legacyDaemon.isFile() ? legacyDaemon : dshDaemon;
+    }
+
+    private File resolvePythonBin() {
+        File py3 = new File(getFilesDir(), "usr/bin/python3");
+        if (py3.isFile() && py3.canExecute()) {
+            return py3;
+        }
+        File py = new File(getFilesDir(), "usr/bin/python");
+        return (py.isFile() && py.canExecute()) ? py : null;
+    }
+
+    private ProcessBuilder buildDaemonCommand(File daemonBin, String action) {
+        File py = resolvePythonBin();
+        if (py != null) {
+            return new ProcessBuilder(py.getAbsolutePath(), daemonBin.getAbsolutePath(), action);
+        }
+        return new ProcessBuilder(daemonBin.getAbsolutePath(), action);
     }
 
     private void startBackgroundDaemon() {
         new Thread(() -> {
             try {
-                // Give runtime environment a brief moment to stabilize
-                Thread.sleep(1500);
-                File daemonBin = new File(getFilesDir(), "usr/bin/agy-daemon");
-                if (daemonBin.canExecute()) {
-                    Log.i(TAG, "Starting autonomous background daemon...");
-                    ProcessBuilder pb = new ProcessBuilder(daemonBin.getAbsolutePath(), "start");
-                    pb.directory(getFilesDir());
-                    pb.environment().put("PATH", getFilesDir().getAbsolutePath() + "/usr/bin:" + System.getenv("PATH"));
-                    pb.environment().put("HOME", getFilesDir().getAbsolutePath());
-                    pb.start();
+                if (destroyed) {
+                    return;
+                }
+                File daemonBin = resolveDaemonBin();
+                File py = resolvePythonBin();
+                if (!daemonBin.isFile()) {
+                    Log.d(TAG, "dsh-daemon not present yet; skipping background daemon start");
+                    return;
+                }
+                if (py == null) {
+                    Log.d(TAG, "python3 not installed in usr/bin; skipping background daemon start");
+                    return;
+                }
+                Log.i(TAG, "Starting autonomous background daemon (" + daemonBin.getName() + ")...");
+                ProcessBuilder pb = buildDaemonCommand(daemonBin, "start");
+                pb.directory(getFilesDir());
+                pb.redirectErrorStream(true);
+                applyDaemonEnvironment(pb);
+                Process p = pb.start();
+                StringBuilder out = new StringBuilder();
+                try (java.io.BufferedReader r = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(p.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = r.readLine()) != null) {
+                        if (out.length() < 1024) {
+                            if (out.length() > 0) out.append(" | ");
+                            out.append(line);
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+                if (!p.waitFor(5000, TimeUnit.MILLISECONDS)) {
+                    Log.w(TAG, daemonBin.getName() + " start timed out; destroying");
+                    p.destroyForcibly();
+                } else if (p.exitValue() != 0) {
+                    Log.w(TAG, daemonBin.getName() + " start exited " + p.exitValue() + ": " + out);
+                } else {
+                    Log.i(TAG, daemonBin.getName() + " start: " + out);
                 }
             } catch (Exception e) {
-                Log.w(TAG, "Failed to start agy-daemon: " + e.getMessage());
+                Log.w(TAG, "Failed to start dsh-daemon: " + e.getMessage());
             }
-        }, "AgyDaemonStarter").start();
+        }, "DshDaemonStarter").start();
     }
 
     private void stopBackgroundDaemon() {
         try {
-            File daemonBin = new File(getFilesDir(), "usr/bin/agy-daemon");
-            if (daemonBin.canExecute()) {
-                Log.i(TAG, "Stopping autonomous background daemon...");
-                ProcessBuilder pb = new ProcessBuilder(daemonBin.getAbsolutePath(), "stop");
+            File daemonBin = resolveDaemonBin();
+            if (daemonBin.isFile() && resolvePythonBin() != null) {
+                Log.i(TAG, "Stopping autonomous background daemon (" + daemonBin.getName() + ")...");
+                ProcessBuilder pb = buildDaemonCommand(daemonBin, "stop");
                 pb.directory(getFilesDir());
-                pb.environment().put("PATH", getFilesDir().getAbsolutePath() + "/usr/bin:" + System.getenv("PATH"));
-                pb.environment().put("HOME", getFilesDir().getAbsolutePath());
+                applyDaemonEnvironment(pb);
                 Process p = pb.start();
                 if (!p.waitFor(1500, TimeUnit.MILLISECONDS)) {
-                    Log.w(TAG, "agy-daemon stop timed out after 1500ms; destroying forcibly");
+                    Log.w(TAG, daemonBin.getName() + " stop timed out after 1500ms; destroying forcibly");
                     p.destroyForcibly();
                 }
             }
         } catch (Exception e) {
-            Log.w(TAG, "Failed to stop agy-daemon: " + e.getMessage());
+            Log.w(TAG, "Failed to stop dsh-daemon: " + e.getMessage());
         }
     }
 
@@ -151,6 +227,7 @@ public final class CoreServerService extends Service {
             runtime.stopNetworkMonitor();
         }
         CoreRuntimeState.serverUrl = null;
+        CoreRuntimeState.detectedWebUrl = null;
         CoreRuntimeState.lastError = null;
         CoreRuntimeState.restarting = false;
         super.onDestroy();
