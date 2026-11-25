@@ -53,11 +53,13 @@ public final class ManifestVerifier {
                 files = root; // accept a flat {path: sha256} object too
             }
             Iterator<String> keys = files.keys();
+            boolean verifiedAnyExtractedFile = false;
             while (keys.hasNext()) {
                 String relative = keys.next();
                 if (isAssetOnly(relative)) {
                     continue;
                 }
+                verifiedAnyExtractedFile = true;
                 String expected = files.optString(relative, null);
                 File target = new File(runtimeDir, relative);
                 if (expected == null || !target.isFile()) {
@@ -73,6 +75,14 @@ public final class ManifestVerifier {
                 if (!expected.equalsIgnoreCase(actual)) {
                     return "hash mismatch for " + relative
                             + " (expected=" + expected + " actual=" + actual + ")";
+                }
+            }
+            // The manifest normally describes only the packed archive, whose
+            // contents were just extracted. In that case verify the extraction
+            // actually produced a usable runtime instead of passing vacuously.
+            if (!verifiedAnyExtractedFile) {
+                if (!new File(runtimeDir, "dsh/apps/cli/lib/bin.js").isFile()) {
+                    return "runtime entrypoint missing after extraction: dsh/apps/cli/lib/bin.js";
                 }
             }
             return null;

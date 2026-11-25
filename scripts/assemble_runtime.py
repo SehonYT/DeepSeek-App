@@ -423,6 +423,12 @@ module.exports.default = module.exports;
             allowed_prebuilds.add("android-arm64")
         if target_arch in ("universal", "armeabi-v7a"):
             allowed_prebuilds.add("android-arm")
+        # x86 / x86_64: no vendored pty.node exists yet, so these userspaces get
+        # no terminal support. Say so loudly instead of shipping a bundle that
+        # fails later when the UI tries to open a PTY.
+        if target_arch in ("x86", "x86_64"):
+            print(f"[!] WARNING: no native pty.node for {target_arch}; "
+                  f"the terminal will be unavailable on this ABI")
 
         pb_dir = os.path.join(src_pty_pkg, "prebuilds")
         if os.path.isdir(pb_dir):

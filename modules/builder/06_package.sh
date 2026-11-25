@@ -38,7 +38,11 @@ assets_dir = sys.argv[3]
 jni_dir = sys.argv[4]
 target_arch = sys.argv[5]
 
-allowed_abis = {"arm64-v8a", "armeabi-v7a"} if target_arch == "universal" else {target_arch}
+# A universal APK must carry native libs for every ABI we ship a userspace for,
+# otherwise x86 devices get an APK whose zstd binary is absent and the runtime
+# cannot be extracted. Split APKs carry only their own ABI.
+ALL_ABIS = {"arm64-v8a", "armeabi-v7a", "x86", "x86_64"}
+allowed_abis = ALL_ABIS if target_arch == "universal" else {target_arch}
 
 with zipfile.ZipFile(apk_path, "a", compression=zipfile.ZIP_DEFLATED) as z:
     z.write(dex_path, "classes.dex")
