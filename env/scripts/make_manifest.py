@@ -102,9 +102,18 @@ def make_manifest(root: Path) -> dict:
     for required in (overlay, pkg):
         if not required.exists():
             raise FileNotFoundError(f"required env bundle input is missing: {required}")
-    if not bootstrap.is_file() and not bootstrap_arm.is_file():
+    # A per-ABI APK may legitimately bundle only x86 userspaces, so require at
+    # least ONE bootstrap archive rather than specifically an ARM one.
+    bootstrap_dir = root / "bootstrap"
+    any_bootstrap = False
+    if bootstrap_dir.is_dir():
+        for name in bootstrap_dir.iterdir():
+            if name.name.startswith("bootstrap") and name.suffix in (".gz", ".zst", ".tar"):
+                any_bootstrap = True
+                break
+    if not any_bootstrap:
         raise FileNotFoundError(
-            f"required env bootstrap archive is missing under {root / 'bootstrap'}"
+            f"required env bootstrap archive is missing under {bootstrap_dir}"
         )
 
     identity = {
