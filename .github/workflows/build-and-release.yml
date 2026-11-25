@@ -169,12 +169,19 @@ jobs:
       - name: Sync App Version from Tag
         run: |
           TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
+          CURRENT_CODE=$(sed -n 's/^APP_VERSION_CODE=//p' config/app.env | tr -d "[:space:]")
+          CURRENT_CODE=${CURRENT_CODE:-0}
           if [[ "$TAG" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then
             VER="${BASH_REMATCH[1]}"
-            echo "[CI] Updating config/app.env to version $VER (from $TAG)..."
-            sed -i -E "s/^APP_VERSION_NAME=.*/APP_VERSION_NAME=$VER/" config/app.env
             IFS='.' read -r major minor patch <<< "$VER"
             CODE=$(( major * 10000 + minor * 100 + patch ))
+            if [ "$CODE" -lt "$CURRENT_CODE" ]; then
+              echo "::error::refusing to downgrade: tag $TAG gives versionCode $CODE but app is already $CURRENT_CODE"
+              echo "::error::a lower versionCode cannot be installed over the existing app (INSTALL_FAILED_VERSION_DOWNGRADE)"
+              exit 1
+            fi
+            echo "[CI] Updating config/app.env to version $VER (code $CODE, from $TAG)..."
+            sed -i -E "s/^APP_VERSION_NAME=.*/APP_VERSION_NAME=$VER/" config/app.env
             sed -i -E "s/^APP_VERSION_CODE=.*/APP_VERSION_CODE=$CODE/" config/app.env
           fi
           cat config/app.env
