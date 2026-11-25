@@ -28,7 +28,9 @@ public final class ManifestVerifier {
             Iterator<String> keys = files.keys();
             while (keys.hasNext()) {
                 String relative = keys.next();
-                if (relative.endsWith("manifest.json") || relative.endsWith("dsh.tar.gz")) {
+                if (relative.endsWith("manifest.json")
+                        || relative.endsWith("dsh.tar.gz")
+                        || relative.endsWith("dsh.tar.zst")) {
                     continue;
                 }
                 String expected = files.optString(relative, null);
@@ -53,6 +55,21 @@ public final class ManifestVerifier {
             return null; // manifest is optional
         } catch (Exception e) {
             return "manifest unreadable: " + e.getMessage();
+        }
+    }
+
+    /** Looks up the expected SHA-256 for an archived runtime asset (e.g. dsh.tar.zst). */
+    public static String expectedArchiveSha256(Context appContext, String archiveKey) {
+        try (InputStream raw = appContext.getAssets().open(RuntimePaths.MANIFEST_ASSET)) {
+            JSONObject root = new JSONObject(IoUtil.readAll(raw, "UTF-8"));
+            JSONObject files = root.optJSONObject("files");
+            if (files == null) {
+                files = root;
+            }
+            String sha = files.optString(archiveKey, null);
+            return (sha != null && !sha.isEmpty()) ? sha : null;
+        } catch (Exception e) {
+            return null;
         }
     }
 }
