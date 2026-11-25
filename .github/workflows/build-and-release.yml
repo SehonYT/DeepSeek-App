@@ -27,9 +27,29 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build DeepSeek APK
+  build-apk:
+    name: Build ${{ matrix.apk }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: universal
+            arch: universal
+            dev: 'false'
+            apk: deepseek.apk
+          - target: arm64-v8a
+            arch: arm64-v8a
+            dev: 'false'
+            apk: deepseek-arm64-v8a.apk
+          - target: armeabi-v7a
+            arch: armeabi-v7a
+            dev: 'false'
+            apk: deepseek-armeabi-v7a.apk
+          - target: dev
+            arch: universal
+            dev: 'true'
+            apk: deepseek-dev.apk
 
     steps:
       - name: Checkout Source Code
@@ -59,8 +79,7 @@ jobs:
       - name: Prepare Android Build Tools & Keystore
         run: |
           mkdir -p tools vendor archives
-          
-          # 1. Setup signing keystores (permanent salman2005 signature)
+
           if [ -f "tools/release.keystore" ]; then
             echo "[CI] Using committed release.keystore (signed with salman2005)..."
             cp -f tools/release.keystore tools/debug.keystore
@@ -74,43 +93,38 @@ jobs:
             cp -f tools/release.keystore tools/debug.keystore
           fi
 
-          # 2. Setup Android API 34 android.jar if absent
           if [ ! -f "tools/android.jar" ]; then
             echo "[CI] Fetching android.jar (API 34)..."
             curl -fsSL -o tools/android.jar "https://raw.githubusercontent.com/Sable/android-platforms/master/android-34/android.jar"
           fi
 
-          # 3. Setup R8 / D8 compiler jar if absent
           if [ ! -f "tools/r8.jar" ]; then
             echo "[CI] Fetching r8.jar..."
             curl -fsSL -o tools/r8.jar "https://dl.google.com/dl/android/maven2/com/android/tools/r8/8.2.42/r8-8.2.42.jar"
           fi
 
-      - name: Cross-Compile Native Binaries (android-arm pty.node & jniLibs zstd)
+      - name: Cross-Compile Native Binaries (${{ matrix.arch }})
         run: |
           mkdir -p archives
           echo "[CI] Cloning deepseek-harness source..."
           git clone --depth 1 https://github.com/salmanbappi/deepseek-harness.git archives/dsh-source
 
-          if [ ! -f "vendor/native/android-arm/pty.node" ]; then
+          if [ "${{ matrix.arch }}" != "arm64-v8a" ] && [ ! -f "vendor/native/android-arm/pty.node" ]; then
             echo "[CI] Building 32-bit armeabi-v7a pty.node with Android NDK..."
             bash scripts/build_pty_node.sh --arch android-arm --dsh-source archives/dsh-source
           fi
-          echo "[CI] Building native zstd decompression binaries (libdsh_zstd.so)..."
-          bash scripts/build_zstd.sh --arch all
-          ls -lh vendor/native/android-arm64/pty.node vendor/native/android-arm/pty.node app/src/main/jniLibs/*/libdsh_zstd.so
+          echo "[CI] Building native zstd decompression binary (${{ matrix.arch }})..."
+          bash scripts/build_zstd.sh --arch "${{ matrix.arch }}"
+          ls -lh app/src/main/jniLibs/*/libdsh_zstd.so
 
-      - name: Assemble DeepSeek Harness Runtime Bundles (Universal & Split ABIs, .tar.zst)
+      - name: Assemble Runtime Bundle (${{ matrix.arch }}, .tar.zst)
         run: |
-          for arch in universal arm64-v8a armeabi-v7a; do
-            echo "[CI] Assembling runtime bundle for $arch..."
-            python3 scripts/assemble_runtime.py --arch "$arch" archives/dsh-source "archives/dsh-termux-prebuilt-v0.2.2-rc.3-${arch}.tar.zst"
-          done
-          ls -lh archives/dsh-termux-prebuilt-*.tar.zst
+          python3 scripts/assemble_runtime.py --arch "${{ matrix.arch }}" archives/dsh-source "archives/dsh-termux-prebuilt-v0.2.2-rc.3-${{ matrix.arch }}.tar.zst"
+          ls -lh "archives/dsh-termux-prebuilt-v0.2.2-rc.3-${{ matrix.arch }}.tar.zst"
 
-      - name: Build Pre-Patched zstd Termux Bootstraps (arm64-v8a & armeabi-v7a)
+      - name: Build Pre-Patched zstd Termux Bootstrap (${{ matrix.arch }})
         run: |
-          bash env/build.sh --arch universal bootstrap
+          bash env/build.sh --arch "${{ matrix.arch }}" bootstrap
           ls -lh env/bootstrap/bootstrap*.tar.zst
 
       - name: Sync App Version from Tag
@@ -126,27 +140,36 @@ jobs:
           fi
           cat config/app.env
 
-      - name: Build DeepSeek Universal Release APK (dist/deepseek.apk)
+      - name: Build ${{ matrix.apk }}
         run: |
-          bash build.sh --arch universal
+          if [ "${{ matrix.dev }}" = "true" ]; then
+            bash build.sh --dev --arch "${{ matrix.arch }}"
+          else
+            bash build.sh --arch "${{ matrix.arch }}"
+          fi
 
-      - name: Build DeepSeek ARM64 Split APK (dist/deepseek-arm64-v8a.apk)
+      - name: Verify APK ABI & Manifest Integrity
         run: |
-          bash build.sh --arch arm64-v8a
+          python3 scripts/verify_apk_abi.py "dist/${{ matrix.apk }}" --arch "${{ matrix.arch }}"
 
-      - name: Build DeepSeek ARMv7 Split APK (dist/deepseek-armeabi-v7a.apk)
-        run: |
-          bash build.sh --arch armeabi-v7a
+      - name: Upload ${{ matrix.apk }} Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ matrix.target }}
+          path: dist/${{ matrix.apk }}
 
-      - name: Build DeepSeek Dev APK (dist/deepseek-dev.apk)
-        run: |
-          bash build.sh --dev --arch universal
+  release:
+    name: Package & Publish Release
+    needs: build-apk
+    runs-on: ubuntu-latest
 
-      - name: Verify APK ABI Integrity
-        run: |
-          python3 scripts/verify_apk_abi.py dist/deepseek.apk --arch universal
-          python3 scripts/verify_apk_abi.py dist/deepseek-arm64-v8a.apk --arch arm64-v8a
-          python3 scripts/verify_apk_abi.py dist/deepseek-armeabi-v7a.apk --arch armeabi-v7a
+    steps:
+      - name: Download Built APKs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: apk-*
+          merge-multiple: true
+          path: dist
 
       - name: Compute Cryptographic Checksums
         run: |
@@ -154,7 +177,7 @@ jobs:
           sha256sum deepseek.apk deepseek-arm64-v8a.apk deepseek-armeabi-v7a.apk deepseek-dev.apk > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Upload Build Artifacts
+      - name: Upload Combined Build Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: deepseek-binaries
