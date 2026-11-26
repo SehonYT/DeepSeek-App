@@ -73,6 +73,10 @@ public class MainActivity extends Activity
 
     private boolean appLoaded = false;
     private boolean activityResumed = false;
+    private boolean pendingWebViewRecovery = false;
+    private long pausedAtMs = 0L;
+    private long recoveryWindowStartMs = 0L;
+    private int recoveryCount = 0;
     private int loadedGeneration = -1;
     private long splashDeadline;
 
@@ -226,6 +230,74 @@ public class MainActivity extends Activity
         }
     }
 
+    @Override
+    public void onRenderProcessGone(boolean didCrash) {
+        handler.post(() -> {
+            destroyDeadWebView();
+            long now = System.currentTimeMillis();
+            if (now - recoveryWindowStartMs > 30_000L) {
+                recoveryWindowStartMs = now;
+                recoveryCount = 0;
+            }
+            if (++recoveryCount > 3) {
+                Log.e(TAG, "WebView renderer crashed >3 times in 30s; showing fatal error");
+                if (splash != null) {
+                    splash.showFatalError("WebView renderer crashed repeatedly. Tap Retry to reload.");
+                }
+                return;
+            }
+            if (activityResumed) {
+                pendingWebViewRecovery = false;
+                recreateWebViewAndReload();
+            } else {
+                pendingWebViewRecovery = true;
+            }
+        });
+    }
+
+    private void destroyDeadWebView() {
+        if (webViewHost == null) {
+            return;
+        }
+        WebView wv = webViewHost.getWebView();
+        webViewHost = null;
+        appLoaded = false;
+        loadedGeneration = -1;
+        if (wv != null) {
+            try {
+                wv.stopLoading();
+                wv.setWebChromeClient(null);
+                wv.setWebViewClient(null);
+                wv.setDownloadListener(null);
+                android.view.ViewParent parent = wv.getParent();
+                if (parent instanceof android.view.ViewGroup) {
+                    ((android.view.ViewGroup) parent).removeView(wv);
+                }
+                wv.destroy();
+            } catch (Exception e) {
+                Log.w(TAG, "error destroying crashed WebView", e);
+            }
+        }
+    }
+
+    private void recreateWebViewAndReload() {
+        if (webViewHost != null || rootLayout == null || isFinishing() || isDestroyed()) {
+            return;
+        }
+        Log.i(TAG, "Recreating WebView after renderer process exit");
+        webViewHost = new WebViewHost(this, themeManager, oauthManager, androidBridge, this);
+        webViewHost.setListener(this);
+        rootLayout.addView(webViewHost.getWebView(), 0, ViewParams.full());
+        if (CoreRuntimeState.serverUrl != null) {
+            appLoaded = true;
+            loadedGeneration = CoreRuntimeState.readyGeneration;
+            if (splash != null) {
+                splash.clearFatal();
+            }
+            webViewHost.loadApp();
+        }
+    }
+
     public void loadDeepSeekUrl(final String url) {
         handler.post(new Runnable() {
             @Override
@@ -349,6 +421,7 @@ public class MainActivity extends Activity
     @Override
     protected void onPause() {
         activityResumed = false;
+        pausedAtMs = System.currentTimeMillis();
         handler.removeCallbacks(pollServer);
         if (webViewHost != null) {
             AppLifecycle.pause(webViewHost.getWebView());
@@ -366,8 +439,17 @@ public class MainActivity extends Activity
         super.onResume();
         activityResumed = true;
         activeActivity = this;
+        if (pendingWebViewRecovery) {
+            pendingWebViewRecovery = false;
+            recreateWebViewAndReload();
+        }
         if (webViewHost != null) {
             AppLifecycle.resume(webViewHost.getWebView());
+        }
+        long backgroundMs = pausedAtMs > 0L ? (System.currentTimeMillis() - pausedAtMs) : 0L;
+        pausedAtMs = 0L;
+        if (backgroundMs >= 5_000L && appLoaded && CoreRuntimeState.serverUrl != null && !CoreRuntimeState.restarting) {
+            CoreServiceLauncher.checkHealth(this);
         }
         refreshTheme();
         handler.removeCallbacks(pollServer);

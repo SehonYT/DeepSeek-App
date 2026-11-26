@@ -27,6 +27,7 @@ public final class AndroidBridge {
     private final EngineConfigJson config;
     private final String blobBridgeToken = createBlobBridgeToken();
     private volatile WeakReference<MainActivity> activityRef;
+    private volatile long lastStallReportMs = 0L;
 
     public AndroidBridge(Context context, RuntimeManager runtime,
                          ShizukuBridge shizuku, ThemeManager theme) {
@@ -67,6 +68,19 @@ public final class AndroidBridge {
         if (matchesNativeBridgeToken(token)) {
             ui.onUiError(errorMessage);
         }
+    }
+
+    @JavascriptInterface
+    public void reportConnectionStall(String token) {
+        if (!matchesNativeBridgeToken(token)) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastStallReportMs < 25_000L) {
+            return;
+        }
+        lastStallReportMs = now;
+        com.dsh.core.CoreServiceLauncher.restart(appContext, "Connection handshake timed out; restarting core...");
     }
 
     @JavascriptInterface

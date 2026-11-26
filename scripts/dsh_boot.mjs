@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 // dsh_boot.mjs - Lightweight startup wrapper for timing instrumentation,
 // instant HTTP-bind wakeup, and deferred V8 compile-cache flushing.
-import http from "node:http";
-import moduleApi from "node:module";
-
+// Capture line-1 timestamp before importing built-in modules so node_line1_ms
+// measures bare VM startup cleanly.
 const tLine1 = process.hrtime.bigint();
 const forkWallMs = Number(process.env.DSH_FORK_WALL_MS || 0);
 const forkToLine1Ms = forkWallMs > 0 ? Math.max(0, Date.now() - forkWallMs) : -1;
+
+// Use CJS require() for node:http / node:module so ESM syncExports() does not
+// eagerly evaluate node:http's WebSocket/fetch getters (which load internal undici).
+const { createRequire } = await import("node:module");
+const _bootRequire = createRequire(import.meta.url);
+const http = _bootRequire("node:http");
+const moduleApi = _bootRequire("node:module");
 
 let tModuleLoaded = tLine1;
 let moduleLoadMs = -1;

@@ -33,6 +33,7 @@ public final class CoreProcessSupervisor {
 
     private volatile Process process;
     private volatile boolean stopping = false;
+    private volatile boolean intentionalRestart = false;
     private Thread worker;
     private final Object readyLock = new Object();
 
@@ -74,6 +75,20 @@ public final class CoreProcessSupervisor {
         if (worker != null) {
             worker.interrupt();
         }
+    }
+
+    public void restartCore(String reason) {
+        if (stopping) {
+            return;
+        }
+        Log.w(TAG, "Restarting core intentionally: " + reason);
+        intentionalRestart = true;
+        CoreRuntimeState.restarting = true;
+        CoreRuntimeState.lastError = reason != null ? reason : "Restarting core...";
+        CoreRuntimeState.serverUrl = null;
+        CoreRuntimeState.detectedWebUrl = null;
+        destroy(process);
+        notifyReadyLock();
     }
 
     private void runCore() {
@@ -178,6 +193,15 @@ public final class CoreProcessSupervisor {
                 if (stopping) {
                     break;
                 }
+                if (intentionalRestart) {
+                    intentionalRestart = false;
+                    attempt = 0;
+                    CoreRuntimeState.serverUrl = null;
+                    CoreRuntimeState.detectedWebUrl = null;
+                    CoreLogWriter.closeQuietly(log);
+                    log = null;
+                    continue;
+                }
                 try {
                     streamer.join(1000);
                     errStreamer.join(500);
@@ -219,6 +243,15 @@ public final class CoreProcessSupervisor {
             } catch (Exception e) {
                 if (stopping) {
                     break;
+                }
+                if (intentionalRestart) {
+                    intentionalRestart = false;
+                    attempt = 0;
+                    CoreRuntimeState.serverUrl = null;
+                    CoreRuntimeState.detectedWebUrl = null;
+                    CoreLogWriter.closeQuietly(log);
+                    log = null;
+                    continue;
                 }
                 Log.e(TAG, "core start failed", e);
                 CoreRuntimeState.lastError = ErrorText.describe(e);
@@ -266,7 +299,9 @@ public final class CoreProcessSupervisor {
                     CoreLogWriter.writeLine(log, readyStatus);
                     return true;
                 }
-                if (System.currentTimeMillis() - tcpOpenAt >= 500L) {
+                // Allow tokenized "dsh web:" log output (~900ms after http.listen) to win
+                // before falling back to the bare port URL, preventing WebView double loads.
+                if (System.currentTimeMillis() - tcpOpenAt >= 2500L) {
                     CoreRuntimeState.serverUrl = CoreUrl.startUrl(port);
                     CoreRuntimeState.lastError = null;
                     CoreRuntimeState.restarting = false;
