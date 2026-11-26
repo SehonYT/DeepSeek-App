@@ -250,12 +250,20 @@ def bundle_workspace_esm_splitting(work_dir: str, cli_dir: str, esbuild_pkg: str
         def collect(v):
             if isinstance(v, str):
                 p = os.path.normpath(os.path.join(rel, v))
-                if "/types/" not in p and p.endswith((".js", ".mjs")) and os.path.isfile(os.path.join(work_dir, p)):
+                bn = os.path.basename(p)
+                if (
+                    "/types/" not in p
+                    and p.endswith((".js", ".mjs"))
+                    and bn not in ("client.js", "client.browser.js", "browser.js")
+                    and not bn.endswith(".browser.js")
+                    and os.path.isfile(os.path.join(work_dir, p))
+                ):
                     entries.add(p)
             elif isinstance(v, dict):
                 for k, val in v.items():
-                    if k not in ("types", "browser"):
-                        collect(val)
+                    if k in ("types", "browser") or k.startswith(("./client", "./browser")):
+                        continue
+                    collect(val)
 
         collect(pj.get("main"))
         collect(pj.get("module"))
@@ -389,7 +397,11 @@ console.log("[OK] esbuild --splitting emitted " + Object.keys(result.metafile.ou
                     if "types" in os.path.relpath(r, lib_dir).split(os.sep):
                         continue
                     for fn in fs_list:
-                        if fn.endswith((".js", ".mjs")) and fn != "dsh_boot.mjs":
+                        if (
+                            fn.endswith((".js", ".mjs"))
+                            and fn not in ("dsh_boot.mjs", "client.js", "client.browser.js", "browser.js")
+                            and not fn.endswith(".browser.js")
+                        ):
                             os.remove(os.path.join(r, fn))
         copy_tree_files(out_dir, work_dir)
     finally:
