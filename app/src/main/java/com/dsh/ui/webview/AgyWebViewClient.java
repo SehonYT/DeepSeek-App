@@ -58,7 +58,7 @@ public final class AgyWebViewClient extends WebViewClient {
         } catch (Throwable ignored) {
         }
         if (listener != null) {
-            listener.onRendererGone();
+            listener.onRendererGone(didCrash);
         }
         return true;
     }
@@ -293,6 +293,21 @@ public final class AgyWebViewClient extends WebViewClient {
                 + "if(typeof b.hasClipboardImage==='function'&&typeof b.requestClipboardImagePaste==='function'){"
                 + "if(!b.hasClipboardImage(String(tok)))return;e.preventDefault();if(e.stopImmediatePropagation)e.stopImmediatePropagation();b.requestClipboardImagePaste(String(tok));}"
                 + "},true);"
+                + "if(!window.__DSH_CONN_WATCHDOG__&&typeof console!=='undefined'&&typeof console.warn==='function'){"
+                + "window.__DSH_CONN_WATCHDOG__=true;"
+                + "var origWarn=console.warn.bind(console);var timeouts=0;"
+                + "console.warn=function(){"
+                + "try{var msg=arguments.length?String(arguments[0]):'';"
+                + "if(msg.indexOf('[connection]')>=0){"
+                + "if(msg.indexOf('not ready within')>=0||msg.indexOf('connection lost, retry #')>=0){"
+                + "timeouts++;"
+                + "if(timeouts>=2&&(typeof navigator==='undefined'||navigator.onLine!==false)){"
+                + "timeouts=0;var tok=window.__AG_NATIVE_BRIDGE_TOKEN__,b=window.Android;"
+                + "if(tok&&b&&typeof b.reportConnectionStall==='function'){b.reportConnectionStall(String(tok));}"
+                + "}"
+                + "}else if(msg.indexOf('established')>=0||(msg.indexOf('ready')>=0&&msg.indexOf('not ready')<0)){timeouts=0;}"
+                + "}}catch(ignored){}"
+                + "return origWarn.apply(console,arguments);};}"
                 + "})();";
         v.evaluateJavascript(js, null);
     }

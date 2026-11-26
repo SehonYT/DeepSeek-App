@@ -67,6 +67,7 @@ public final class FileModeUtil {
     public static void applyMode(File file, long mode) {
         try {
             Os.chmod(file.getAbsolutePath(), (int) (mode & 0777L));
+            return;
         } catch (ErrnoException e) {
             Log.w(TAG, "chmod failed " + file + ": " + e);
         }

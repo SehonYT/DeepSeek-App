@@ -5,7 +5,9 @@ verify_apk_abi.py - Verify that an APK's bundled bootstrap and native addons mat
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
+import json
 import shutil
 import struct
 import subprocess
@@ -77,12 +79,72 @@ def scan_tar_bytes(raw: bytes, label: str) -> list[tuple[str, int, int]]:
     return results
 
 
+def sha256_zip_entry(zf: zipfile.ZipFile, name: str) -> str:
+    h = hashlib.sha256()
+    with zf.open(name) as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def verify_manifests_and_zstd(zf: zipfile.ZipFile, names: set[str], arch: str) -> None:
+    has_zst_asset = any(n.startswith("assets/") and n.endswith((".zst", ".tzst")) for n in names)
+    if has_zst_asset:
+        if arch in ("x86", "x86_64"):
+            raise SystemExit(f"FAIL: .zst asset present in {arch} APK which has no libdsh_zstd.so")
+        required_zstd_abis = {"arm64-v8a", "armeabi-v7a"} if arch == "universal" else {arch}
+        for abi in sorted(required_zstd_abis):
+            so_name = f"lib/{abi}/libdsh_zstd.so"
+            if so_name not in names:
+                raise SystemExit(f"FAIL: .zst asset present in APK but {so_name} is missing")
+            if zf.getinfo(so_name).compress_type != zipfile.ZIP_STORED:
+                raise SystemExit(f"FAIL: {so_name} must be ZIP_STORED in APK")
+
+    runtime_entries = [n for n in names if n.startswith("assets/runtime/")]
+    if runtime_entries:
+        if "assets/runtime/manifest.json" not in names:
+            raise SystemExit("FAIL: assets/runtime/ present without assets/runtime/manifest.json")
+        rt_manifest = json.loads(zf.read("assets/runtime/manifest.json").decode("utf-8"))
+        rt_files = rt_manifest.get("files", rt_manifest)
+        for rel, expected_sha in rt_files.items():
+            asset_name = f"assets/runtime/{rel}"
+            if asset_name not in names:
+                raise SystemExit(f"FAIL: runtime manifest entry missing from APK: {asset_name}")
+            info = zf.getinfo(asset_name)
+            if rel.endswith((".zst", ".tzst", ".gz", ".tgz")) and info.compress_type != zipfile.ZIP_STORED:
+                raise SystemExit(f"FAIL: runtime archive {asset_name} must be ZIP_STORED")
+            actual_sha = sha256_zip_entry(zf, asset_name)
+            if expected_sha and actual_sha.lower() != expected_sha.lower():
+                raise SystemExit(f"FAIL: sha256 mismatch for {asset_name}: got {actual_sha}, want {expected_sha}")
+
+    if "assets/env/manifest.json" in names:
+        env_manifest = json.loads(zf.read("assets/env/manifest.json").decode("utf-8"))
+        bs_checks = (
+            ("bootstrapSha256", "arm64", ("assets/env/bootstrap/bootstrap.tar.zst", "assets/env/bootstrap/bootstrap.tar.gz")),
+            ("bootstrapArmSha256", "arm32", ("assets/env/bootstrap/bootstrap-arm.tar.zst", "assets/env/bootstrap/bootstrap-arm.tar.gz")),
+            ("bootstrapX86Sha256", "x86", ("assets/env/bootstrap/bootstrap-x86.tar.gz",)),
+            ("bootstrapX64Sha256", "x86_64", ("assets/env/bootstrap/bootstrap-x86_64.tar.gz",)),
+        )
+        for key, label, cands in bs_checks:
+            if not env_manifest.get(key):
+                continue
+            cand = next((c for c in cands if c in names), None)
+            if not cand:
+                raise SystemExit(f"FAIL: env manifest declares {key} but {label} bootstrap is missing")
+            if zf.getinfo(cand).compress_type != zipfile.ZIP_STORED:
+                raise SystemExit(f"FAIL: {cand} must be ZIP_STORED")
+            actual = sha256_zip_entry(zf, cand)
+            if actual.lower() != env_manifest[key].lower():
+                raise SystemExit(f"FAIL: sha256 mismatch for {cand}: got {actual}")
+
+
 def verify_apk(apk_path: Path, arch: str) -> int:
     elfs: list[tuple[str, int, int]] = []
     jni_elfs: list[tuple[str, int, int]] = []
 
     with zipfile.ZipFile(apk_path, "r") as zf:
         names = set(zf.namelist())
+        verify_manifests_and_zstd(zf, names, arch)
         has_arm64_bs = (
             "assets/env/bootstrap/bootstrap.tar.zst" in names
             or "assets/env/bootstrap/bootstrap.tar.gz" in names

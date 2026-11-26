@@ -207,10 +207,9 @@ public final class EnvInstaller {
         Log.i(TAG, "device ABI=" + primaryAbi() + " arch=" + deviceArch()
                 + " bootstrap=" + bootstrapAsset);
         if (isInstalled(ctx)) {
-            updateManagedLayers(ctx, assets, prefix, bootstrapAsset, manifest);
-            return false;
+            return updateManagedLayers(ctx, assets, prefix, bootstrapAsset, manifest);
         }
-        installFresh(ctx, assets, prefix, bootstrapAsset, manifest);
+        installFresh(ctx, assets, prefix, bootstrapAsset, manifest, false);
         return true;
     }
 
@@ -230,7 +229,8 @@ public final class EnvInstaller {
     }
 
     private static void installFresh(Context context, AssetManager assets, File prefix,
-                                     String bootstrapAsset, EnvBundleManifest manifest) {
+                                     String bootstrapAsset, EnvBundleManifest manifest,
+                                     boolean discardReplacedPrefix) {
         File parent = prefix.getParentFile();
         if (parent == null || (!parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory())) {
             throw new IllegalStateException("cannot create prefix parent: " + parent);
@@ -281,6 +281,9 @@ public final class EnvInstaller {
                 throw new IOException("installed bash failed its smoke test; prefix preserved for diagnosis");
             }
             writeSmokeMarker(context, prefix, manifest.bundleId);
+            if (discardReplacedPrefix && quarantined != null) {
+                deleteTreeQuietly(quarantined, context.getFilesDir());
+            }
             Log.i(TAG, "env prefix installed atomically: " + prefix
                     + " bundle=" + manifest.bundleId);
         } catch (Exception e) {
@@ -289,9 +292,14 @@ public final class EnvInstaller {
         }
     }
 
-    /** Refreshes AGY-owned layers but never wipes the mutable prefix or .gemini data. */
-    private static void updateManagedLayers(Context context, AssetManager assets, File prefix,
-                                            String bootstrapAsset, EnvBundleManifest manifest) {
+    /**
+     * Atomically upgrades the prefix when the bundled bootstrap hash changes (leaving home/,
+     * .gemini/, and user data untouched), or refreshes AGY-owned overlay/pkg layers otherwise.
+     *
+     * @return true when the prefix was reinstalled atomically in this call.
+     */
+    private static boolean updateManagedLayers(Context context, AssetManager assets, File prefix,
+                                               String bootstrapAsset, EnvBundleManifest manifest) {
         File nodeBin = new File(prefix, "bin/node");
         // Match isInstalled(): the ARM bundle resolves libsqlite3 to a versioned
         // soname, so a bare exists() on the unversioned symlink would report the
@@ -299,8 +307,8 @@ public final class EnvInstaller {
         boolean sqliteOk = hasLibrary(new File(prefix, "lib"), "libsqlite3.so");
         if (!nodeBin.isFile() || !sqliteOk) {
             Log.w(TAG, "existing prefix lacks node or libsqlite3; forcing fresh install for DeepSeek...");
-            installFresh(context, assets, prefix, bootstrapAsset, manifest);
-            return;
+            installFresh(context, assets, prefix, bootstrapAsset, manifest, false);
+            return true;
         }
         Properties previous = readState(new File(prefix, EnvPaths.MARKER));
         String oldBootstrap = previous.getProperty("bootstrap_sha256");
@@ -309,20 +317,19 @@ public final class EnvInstaller {
         String oldPath = previous.getProperty("prefix_path");
         String targetPrefix = prefix.getAbsolutePath();
 
-        // A full bootstrap replacement can overwrite package-managed/user edits.
-        // Preserve legacy/mutable prefixes and report the pending base migration
-        // instead of silently deleting or rebasing their contents.
-        boolean isArm = EnvPaths.ASSET_BOOTSTRAP_ARM.equals(bootstrapAsset)
-                || EnvPaths.ASSET_BOOTSTRAP_ARM_ZST.equals(bootstrapAsset);
-        String targetBootstrapSha = manifest.expectedBootstrapSha256(isArm);
+        // When the bundled bootstrap hash changes, atomically upgrade the prefix while
+        // preserving home/, .gemini/, and user data; legacy prefixes without a base hash
+        // keep receiving only AGY-managed overlay/pkg refreshes.
+        String targetBootstrapSha = manifest.sha256ForArch(deviceArch());
         boolean bootstrapKnown = oldBootstrap != null && !"legacy".equals(oldBootstrap);
         boolean bootstrapMatches = targetBootstrapSha != null && targetBootstrapSha.equals(oldBootstrap);
         boolean bootstrapPending = !bootstrapMatches;
         String appliedBootstrap = bootstrapKnown ? oldBootstrap : "legacy";
         if (bootstrapKnown && bootstrapPending) {
-            Log.w(TAG, "bootstrap changed; preserving mutable prefix until an explicit migration "
-                    + "is available (installed=" + oldBootstrap + ", bundled="
-                    + targetBootstrapSha + ")");
+            Log.i(TAG, "bootstrap updated (installed=" + oldBootstrap + ", bundled="
+                    + targetBootstrapSha + "); atomically upgrading usr prefix...");
+            installFresh(context, assets, prefix, bootstrapAsset, manifest, true);
+            return true;
         } else if (!bootstrapKnown && bootstrapPending) {
             Log.w(TAG, "legacy prefix has no base version; preserving it and refreshing only "
                     + "AGY-managed overlay/pkg layers");
@@ -359,6 +366,7 @@ public final class EnvInstaller {
         Log.i(TAG, "env managed layers ready: overlay=" + (overlayChanged ? "updated" : "current")
                 + " pkg=" + (pkgChanged ? "updated" : "current")
                 + " bootstrap=" + (bootstrapPending ? "pending" : "current"));
+        return false;
     }
 
     private static void prepareTree(Context context, AssetManager assets, File root,

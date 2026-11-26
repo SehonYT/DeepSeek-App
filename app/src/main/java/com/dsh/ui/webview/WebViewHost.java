@@ -24,7 +24,7 @@ public final class WebViewHost {
          * The WebView renderer died. The host must discard the dead view and
          * recreate the surface; continuing to use it leaves an unresponsive UI.
          */
-        void onRendererGone();
+        void onRendererGone(boolean didCrash);
     }
 
     private final Context context;
@@ -53,9 +53,9 @@ public final class WebViewHost {
             }
 
             @Override
-            public void onRendererGone() {
+            public void onRendererGone(boolean didCrash) {
                 if (WebViewHost.this.listener != null) {
-                    WebViewHost.this.listener.onRendererGone();
+                    WebViewHost.this.listener.onRendererGone(didCrash);
                 }
             }
         }));

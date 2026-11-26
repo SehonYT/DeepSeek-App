@@ -6,7 +6,6 @@ import android.system.Os;
 import android.util.Log;
 
 import com.dsh.util.FileModeUtil;
-import com.dsh.util.PathSafety;
 
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
@@ -16,6 +15,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.zip.GZIPInputStream;
@@ -102,6 +103,18 @@ public final class TarExtractor {
 
     /** @return number of symlinks materialized from the archive. */
     public static int untar(InputStream in, File dest) throws IOException {
+        if (!dest.isDirectory() && !dest.mkdirs() && !dest.isDirectory()) {
+            throw new IOException("cannot create dest dir " + dest);
+        }
+        String destCanon = dest.getCanonicalPath();
+        String destCanonPrefix = destCanon.endsWith(File.separator) ? destCanon : destCanon + File.separator;
+        String[] initialEntries = dest.list();
+        boolean freshDest = initialEntries == null || initialEntries.length == 0;
+        Set<String> verifiedDirs = new HashSet<>();
+        Set<String> seenEntries = new HashSet<>();
+        Set<String> createdDirs = new HashSet<>();
+        Set<String> createdSymlinks = new HashSet<>();
+
         byte[] header = new byte[512];
         byte[] ioBuf = new byte[64 * 1024];
         String pendingName = null;
@@ -176,18 +189,36 @@ public final class TarExtractor {
                 continue;
             }
             File out = new File(dest, name);
-            ensureParentInside(dest, out);
+            boolean hasSymlinkParent = hasSymlinkAncestor(name, createdSymlinks);
+            ensureParentInsideCached(destCanon, destCanonPrefix, name, out,
+                    verifiedDirs, createdDirs, hasSymlinkParent);
+            boolean mayExist = !freshDest || hasSymlinkParent || seenEntries.contains(name);
 
             if (type == '5') {
                 skipEntry(in, size, ioBuf);
-                removeConflictingLeaf(out, true);
-                if (!out.isDirectory() && !out.mkdirs() && !out.isDirectory()) {
-                    throw new IOException("cannot create dir " + out);
+                if (mayExist) {
+                    removeConflictingLeaf(out, true);
                 }
+                if (mayExist || !createdDirs.contains(name)) {
+                    if (!out.isDirectory() && !out.mkdirs() && !out.isDirectory()) {
+                        throw new IOException("cannot create dir " + out);
+                    }
+                }
+                if (!hasSymlinkParent) {
+                    recordDirs(name, verifiedDirs, createdDirs);
+                }
+                createdSymlinks.remove(name);
+                seenEntries.add(name);
                 FileModeUtil.applyMode(out, mode);
             } else if (type == '0') {
-                removeConflictingLeaf(out, false);
-                writeFile(in, out, size, dest, ioBuf);
+                if (mayExist || createdDirs.contains(name)) {
+                    invalidateTree(verifiedDirs, name);
+                    invalidateTree(createdDirs, name);
+                    createdSymlinks.remove(name);
+                    removeConflictingLeaf(out, false);
+                }
+                writeFile(in, out, size, ioBuf);
+                seenEntries.add(name);
                 FileModeUtil.applyMode(out, mode);
             } else if (type == '1') {
                 skipEntry(in, size, ioBuf);
@@ -196,24 +227,36 @@ public final class TarExtractor {
                     throw new IOException("unsafe hardlink target: " + link);
                 }
                 File targetFile = new File(dest, targetNorm);
-                if (!PathSafety.isInside(dest, targetFile)) {
+                if (!isInsideCanon(destCanon, destCanonPrefix, targetFile)) {
                     throw new IOException("hardlink escapes dest: " + targetNorm);
                 }
-                removeConflictingLeaf(out, false);
+                if (mayExist || createdDirs.contains(name)) {
+                    invalidateTree(verifiedDirs, name);
+                    invalidateTree(createdDirs, name);
+                    createdSymlinks.remove(name);
+                    removeConflictingLeaf(out, false);
+                }
                 try {
                     Os.link(targetFile.getAbsolutePath(), out.getAbsolutePath());
                 } catch (ErrnoException e) {
                     throw new IOException("cannot create hardlink " + out + " -> " + targetFile, e);
                 }
+                seenEntries.add(name);
             } else if (type == '2') {
                 skipEntry(in, size, ioBuf);
-                validateLinkTarget(dest, out, link);
-                removeConflictingLeaf(out, false);
+                validateLinkTarget(destCanon, destCanonPrefix, out, link);
+                invalidateTree(verifiedDirs, name);
+                invalidateTree(createdDirs, name);
+                if (mayExist || createdDirs.contains(name)) {
+                    removeConflictingLeaf(out, false);
+                }
                 try {
                     Os.symlink(link, out.getAbsolutePath());
                 } catch (ErrnoException e) {
                     throw new IOException("cannot create symlink " + out + " -> " + link, e);
                 }
+                createdSymlinks.add(name);
+                seenEntries.add(name);
                 links++;
             } else {
                 skipEntry(in, size, ioBuf);
@@ -269,7 +312,13 @@ public final class TarExtractor {
         return null;
     }
 
-    private static void validateLinkTarget(File dest, File linkFile, String target) throws IOException {
+    private static boolean isInsideCanon(String destCanon, String destCanonPrefix, File file) throws IOException {
+        String fileCanon = file.getCanonicalPath();
+        return fileCanon.equals(destCanon) || fileCanon.startsWith(destCanonPrefix);
+    }
+
+    private static void validateLinkTarget(
+            String destCanon, String destCanonPrefix, File linkFile, String target) throws IOException {
         if (target == null || target.isEmpty() || target.indexOf('\0') >= 0) {
             throw new IOException("empty/invalid tar symlink target at " + linkFile);
         }
@@ -281,18 +330,77 @@ public final class TarExtractor {
             return;
         }
         File resolved = new File(linkFile.getParentFile(), target);
-        if (!PathSafety.isInside(dest, resolved)) {
+        if (!isInsideCanon(destCanon, destCanonPrefix, resolved)) {
             throw new IOException("tar symlink escapes env prefix: " + linkFile + " -> " + target);
         }
     }
 
-    private static void ensureParentInside(File dest, File out) throws IOException {
+    private static boolean hasSymlinkAncestor(String relPath, Set<String> createdSymlinks) {
+        if (createdSymlinks.isEmpty() || relPath.isEmpty()) {
+            return false;
+        }
+        int idx = relPath.indexOf('/');
+        while (idx > 0) {
+            if (createdSymlinks.contains(relPath.substring(0, idx))) {
+                return true;
+            }
+            idx = relPath.indexOf('/', idx + 1);
+        }
+        return false;
+    }
+
+    private static void recordDirs(String dirRel, Set<String> verifiedDirs, Set<String> createdDirs) {
+        if (dirRel.isEmpty()) {
+            return;
+        }
+        verifiedDirs.add(dirRel);
+        int idx = dirRel.indexOf('/');
+        while (idx > 0) {
+            createdDirs.add(dirRel.substring(0, idx));
+            idx = dirRel.indexOf('/', idx + 1);
+        }
+        createdDirs.add(dirRel);
+    }
+
+    private static void invalidateTree(Set<String> paths, String prefix) {
+        paths.remove(prefix);
+        String slashPrefix = prefix + "/";
+        for (java.util.Iterator<String> it = paths.iterator(); it.hasNext(); ) {
+            if (it.next().startsWith(slashPrefix)) {
+                it.remove();
+            }
+        }
+    }
+
+    private static void ensureParentInsideCached(
+            String destCanon,
+            String destCanonPrefix,
+            String relPath,
+            File out,
+            Set<String> verifiedDirs,
+            Set<String> createdDirs,
+            boolean hasSymlinkParent
+    ) throws IOException {
+        int slash = relPath.lastIndexOf('/');
+        if (slash <= 0) {
+            return;
+        }
+        String parentRel = relPath.substring(0, slash);
+        if (!hasSymlinkParent && verifiedDirs.contains(parentRel)) {
+            return;
+        }
         File parent = out.getParentFile();
-        if (parent != null && !PathSafety.isInside(dest, parent)) {
+        if (parent == null) {
+            return;
+        }
+        if (!isInsideCanon(destCanon, destCanonPrefix, parent)) {
             throw new IOException("tar entry parent escapes env prefix: " + out);
         }
-        if (parent != null && !parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
+        if (!parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
             throw new IOException("cannot create parent " + parent);
+        }
+        if (!hasSymlinkParent) {
+            recordDirs(parentRel, verifiedDirs, createdDirs);
         }
     }
 
@@ -373,8 +481,7 @@ public final class TarExtractor {
         skipPadding(in, size, buffer);
     }
 
-    private static void writeFile(InputStream in, File out, long size, File dest, byte[] buffer) throws IOException {
-        ensureParentInside(dest, out);
+    private static void writeFile(InputStream in, File out, long size, byte[] buffer) throws IOException {
         try (OutputStream os = new FileOutputStream(out)) {
             copy(in, os, size, buffer);
         }

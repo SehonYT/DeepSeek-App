@@ -11,7 +11,8 @@ public final class MimeTypes {
             return false;
         }
         return mime.startsWith("text/") || mime.equals("application/javascript")
-                || mime.equals("application/json") || mime.equals("image/svg+xml");
+                || mime.equals("application/json") || mime.equals("application/manifest+json")
+                || mime.equals("image/svg+xml");
     }
 
     public static String getMimeType(String name) {
@@ -22,7 +23,8 @@ public final class MimeTypes {
         if (lower.endsWith(".js") || lower.endsWith(".mjs")) return "application/javascript";
         if (lower.endsWith(".css")) return "text/css";
         if (lower.endsWith(".html") || lower.endsWith(".htm")) return "text/html";
-        if (lower.endsWith(".json")) return "application/json";
+        if (lower.endsWith(".json") || lower.endsWith(".map")) return "application/json";
+        if (lower.endsWith(".webmanifest")) return "application/manifest+json";
         if (lower.endsWith(".png")) return "image/png";
         if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
         if (lower.endsWith(".svg")) return "image/svg+xml";

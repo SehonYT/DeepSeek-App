@@ -20,13 +20,39 @@ public final class CoreInstaller {
 
     private static void extractArchive(Context ctx, String assetName, File destDir) throws IOException {
         boolean isZst = assetName.endsWith(".zst") || assetName.endsWith(".tzst");
-        try (java.io.InputStream raw = new java.io.BufferedInputStream(ctx.getAssets().open(assetName), 64 * 1024)) {
+        String manifestKey = assetName.startsWith("runtime/")
+                ? assetName.substring("runtime/".length()) : assetName;
+        String expectedSha = ManifestVerifier.expectedArchiveSha256(ctx, manifestKey);
+        java.security.MessageDigest md;
+        try {
+            md = java.security.MessageDigest.getInstance("SHA-256");
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IOException("SHA-256 unavailable", e);
+        }
+        try (java.io.InputStream raw = new java.io.BufferedInputStream(ctx.getAssets().open(assetName), 64 * 1024);
+             java.security.DigestInputStream digestStream = new java.security.DigestInputStream(raw, md)) {
             if (isZst) {
-                com.dsh.install.TarExtractor.untarZst(ctx, raw, destDir);
+                com.dsh.install.TarExtractor.untarZst(ctx, digestStream, destDir);
                 Log.i(TAG, "Streamed " + assetName + " with native zstd");
             } else {
-                com.dsh.install.TarExtractor.untarGz(raw, destDir);
+                com.dsh.install.TarExtractor.untarGz(digestStream, destDir);
                 Log.i(TAG, "Streamed " + assetName + " with streaming gzip tar");
+            }
+            byte[] drain = new byte[16 * 1024];
+            while (digestStream.read(drain) != -1) {
+            }
+        }
+        if (expectedSha != null) {
+            byte[] digest = md.digest();
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(Character.forDigit((b >> 4) & 0xf, 16));
+                sb.append(Character.forDigit(b & 0xf, 16));
+            }
+            String actualSha = sb.toString();
+            if (!expectedSha.equalsIgnoreCase(actualSha)) {
+                throw new IOException("runtime archive sha256 mismatch for " + manifestKey
+                        + ": got " + actualSha + " want " + expectedSha);
             }
         }
     }

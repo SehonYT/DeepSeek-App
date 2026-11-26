@@ -93,6 +93,10 @@ public class MainActivity extends Activity
 
     private boolean appLoaded = false;
     private boolean activityResumed = false;
+    private boolean pendingWebViewRecovery = false;
+    private long pausedAtMs = 0L;
+    private long recoveryWindowStartMs = 0L;
+    private int recoveryCount = 0;
     private int loadedGeneration = -1;
     /** Boot-elapsed time at which the app URL was handed to the WebView (0 = not yet). */
     private long appLoadedAtUptime = 0L;
@@ -446,48 +450,81 @@ public class MainActivity extends Activity
      * surface and appears frozen.
      */
     @Override
-    public void onRendererGone() {
+    public void onRendererGone(final boolean didCrash) {
         handler.post(new Runnable() {
             @Override
             public void run() {
-                Log.w(TAG, "recreating WebViewHost after renderer death");
-                try {
-                    if (rootLayout != null && webViewHost != null
-                            && webViewHost.getWebView() != null) {
-                        rootLayout.removeView(webViewHost.getWebView());
-                    }
-                    if (webViewHost != null) {
-                        webViewHost.getWebView().destroy();
-                    }
-                } catch (Throwable t) {
-                    Log.w(TAG, "cannot dispose dead WebView: " + t.getMessage());
+                Log.w(TAG, "WebView renderer gone (didCrash=" + didCrash + ")");
+                destroyDeadWebView();
+                long now = System.currentTimeMillis();
+                if (now - recoveryWindowStartMs > 30_000L) {
+                    recoveryWindowStartMs = now;
+                    recoveryCount = 0;
                 }
-                webViewHost = null;
-                appLoaded = false;
-                loadedGeneration = -1;
-                splashDismissed = false;
-                lastStatusKey = null;
-                try {
-                    webViewHost = new WebViewHost(MainActivity.this, themeManager, oauthManager,
-                            androidBridge, MainActivity.this);
-                    webViewHost.setListener(MainActivity.this);
-                    if (rootLayout != null) {
-                        // Insert UNDER the splash overlay: the splash is already the
-                        // top-most child, and adding the WebView last would hide the
-                        // loading state behind a dead (not yet loaded) surface.
-                        rootLayout.addView(webViewHost.getWebView(), 0, ViewParams.full());
-                    }
-                    splash.showLoading();
-                    splash.showStatus("Reloading interface...");
-                } catch (Throwable t) {
-                    Log.e(TAG, "cannot recreate WebView: " + t.getMessage(), t);
-                    showFatalError("interface process crashed and could not be restarted");
+                if (++recoveryCount > 3) {
+                    Log.e(TAG, "WebView renderer crashed >3 times in 30s; showing fatal error");
+                    showFatalError("interface process crashed repeatedly. Tap Retry to reload.");
                     return;
                 }
-                handler.removeCallbacks(pollServer);
-                pollServer.run();
+                if (activityResumed) {
+                    pendingWebViewRecovery = false;
+                    recreateWebViewAndReload();
+                } else {
+                    pendingWebViewRecovery = true;
+                }
             }
         });
+    }
+
+    private void destroyDeadWebView() {
+        if (webViewHost == null) {
+            return;
+        }
+        WebView wv = webViewHost.getWebView();
+        webViewHost = null;
+        appLoaded = false;
+        loadedGeneration = -1;
+        splashDismissed = false;
+        lastStatusKey = null;
+        if (wv != null) {
+            try {
+                wv.removeCallbacks(paintFallback);
+                wv.stopLoading();
+                wv.setWebChromeClient(null);
+                wv.setWebViewClient(null);
+                wv.setDownloadListener(null);
+                if (rootLayout != null) {
+                    rootLayout.removeView(wv);
+                }
+                wv.destroy();
+            } catch (Throwable t) {
+                Log.w(TAG, "cannot dispose dead WebView: " + t.getMessage());
+            }
+        }
+    }
+
+    private void recreateWebViewAndReload() {
+        if (webViewHost != null || rootLayout == null || isFinishing() || isDestroyed()) {
+            return;
+        }
+        try {
+            webViewHost = new WebViewHost(MainActivity.this, themeManager, oauthManager,
+                    androidBridge, MainActivity.this);
+            webViewHost.setListener(MainActivity.this);
+            // Insert UNDER the splash overlay: the splash is already the
+            // top-most child, and adding the WebView last would hide the
+            // loading state behind a dead (not yet loaded) surface.
+            rootLayout.addView(webViewHost.getWebView(), 0, ViewParams.full());
+            splash.clearFatal();
+            splash.showLoading();
+            splash.showStatus("Reloading interface...");
+        } catch (Throwable t) {
+            Log.e(TAG, "cannot recreate WebView: " + t.getMessage(), t);
+            showFatalError("interface process crashed and could not be restarted");
+            return;
+        }
+        handler.removeCallbacks(pollServer);
+        pollServer.run();
     }
 
     /**
@@ -643,6 +680,7 @@ public class MainActivity extends Activity
     @Override
     protected void onPause() {
         activityResumed = false;
+        pausedAtMs = System.currentTimeMillis();
         handler.removeCallbacks(pollServer);
         handler.removeCallbacks(statusTicker);
         if (webViewHost != null) {
@@ -668,8 +706,18 @@ public class MainActivity extends Activity
         super.onResume();
         activityResumed = true;
         activeActivity = this;
+        if (pendingWebViewRecovery) {
+            pendingWebViewRecovery = false;
+            recreateWebViewAndReload();
+        }
         if (webViewHost != null) {
             AppLifecycle.resume(webViewHost.getWebView());
+        }
+        long backgroundMs = pausedAtMs > 0L ? (System.currentTimeMillis() - pausedAtMs) : 0L;
+        pausedAtMs = 0L;
+        if (backgroundMs >= 5_000L && appLoaded && CoreRuntimeState.serverUrl != null
+                && !CoreRuntimeState.restarting) {
+            CoreServiceLauncher.checkHealth(this);
         }
         refreshTheme();
         handler.removeCallbacks(pollServer);

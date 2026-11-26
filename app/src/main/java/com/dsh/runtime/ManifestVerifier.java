@@ -92,4 +92,19 @@ public final class ManifestVerifier {
             return "manifest unreadable: " + e.getMessage();
         }
     }
+
+    /** Looks up the expected SHA-256 for an archived runtime asset (e.g. dsh.tar.zst). */
+    public static String expectedArchiveSha256(Context appContext, String archiveKey) {
+        try (InputStream raw = appContext.getAssets().open(RuntimePaths.MANIFEST_ASSET)) {
+            JSONObject root = new JSONObject(IoUtil.readAll(raw, "UTF-8"));
+            JSONObject files = root.optJSONObject("files");
+            if (files == null) {
+                files = root;
+            }
+            String sha = files.optString(archiveKey, null);
+            return (sha != null && !sha.isEmpty()) ? sha : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
 }

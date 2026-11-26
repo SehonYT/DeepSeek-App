@@ -42,6 +42,7 @@ public final class CoreProcessSupervisor {
 
     private volatile Process process;
     private volatile boolean stopping = false;
+    private volatile boolean intentionalRestart = false;
     /** Last time the core process produced a stdout/stderr line (0 = none yet). */
     private volatile long lastCoreOutputAtMs = 0L;
     /** Readiness budget actually used by the last attempt (reported on timeout). */
@@ -99,6 +100,23 @@ public final class CoreProcessSupervisor {
         killer.start();
     }
 
+    public void restartCore(String reason) {
+        if (stopping) {
+            return;
+        }
+        Log.w(TAG, "Restarting core intentionally: " + reason);
+        intentionalRestart = true;
+        CoreRuntimeState.restarting = true;
+        CoreRuntimeState.lastError = reason != null ? reason : "Restarting core...";
+        CoreRuntimeState.serverUrl = null;
+        CoreRuntimeState.detectedWebUrl = null;
+        final Process proc = process;
+        Thread restarter = new Thread(() -> destroy(proc), "CoreRestartThread");
+        restarter.setDaemon(true);
+        restarter.start();
+        notifyReadyLock();
+    }
+
     private void runCore() {
         try {
             runCoreLoop();
@@ -152,6 +170,15 @@ public final class CoreProcessSupervisor {
                 if (!waitForReady(proc, log)) {
                     if (stopping) {
                         break;
+                    }
+                    if (intentionalRestart) {
+                        intentionalRestart = false;
+                        attempt = 0;
+                        CoreRuntimeState.serverUrl = null;
+                        CoreRuntimeState.detectedWebUrl = null;
+                        CoreLogWriter.closeQuietly(log);
+                        log = null;
+                        continue;
                     }
                     try {
                         streamer.join(1000);
@@ -243,6 +270,15 @@ public final class CoreProcessSupervisor {
                 if (stopping) {
                     break;
                 }
+                if (intentionalRestart) {
+                    intentionalRestart = false;
+                    attempt = 0;
+                    CoreRuntimeState.serverUrl = null;
+                    CoreRuntimeState.detectedWebUrl = null;
+                    CoreLogWriter.closeQuietly(log);
+                    log = null;
+                    continue;
+                }
                 try {
                     streamer.join(1000);
                     errStreamer.join(500);
@@ -297,6 +333,15 @@ public final class CoreProcessSupervisor {
             } catch (Exception e) {
                 if (stopping) {
                     break;
+                }
+                if (intentionalRestart) {
+                    intentionalRestart = false;
+                    attempt = 0;
+                    CoreRuntimeState.serverUrl = null;
+                    CoreRuntimeState.detectedWebUrl = null;
+                    CoreLogWriter.closeQuietly(log);
+                    log = null;
+                    continue;
                 }
                 Log.e(TAG, "core start failed", e);
                 CoreRuntimeState.lastError = ErrorText.describe(e);

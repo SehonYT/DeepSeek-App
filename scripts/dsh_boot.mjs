@@ -1,12 +1,81 @@
 #!/usr/bin/env node
 // dsh_boot.mjs - Lightweight startup wrapper for timing instrumentation,
 // instant HTTP-bind wakeup, and deferred V8 compile-cache flushing.
-import http from "node:http";
-import moduleApi from "node:module";
-
+// Capture line-1 timestamp before importing built-in modules so node_line1_ms
+// measures bare VM startup cleanly.
 const tLine1 = process.hrtime.bigint();
 const forkWallMs = Number(process.env.DSH_FORK_WALL_MS || 0);
 const forkToLine1Ms = forkWallMs > 0 ? Math.max(0, Date.now() - forkWallMs) : -1;
+
+// Defer V8 stack trace capture during startup initialization (restored on HTTP listen)
+// so dense plugin graph wiring does not walk 10 frames per transient Error allocation.
+const origStackLimit = Error.stackTraceLimit;
+Error.stackTraceLimit = 0;
+
+// Use CJS require() for node:http / node:module so ESM syncExports() does not
+// eagerly evaluate node:http's WebSocket/fetch getters (which load internal undici).
+const { createRequire } = await import("node:module");
+const _bootRequire = createRequire(import.meta.url);
+const http = _bootRequire("node:http");
+const moduleApi = _bootRequire("node:module");
+const fs = _bootRequire("node:fs");
+const path = _bootRequire("node:path");
+const { fileURLToPath } = _bootRequire("node:url");
+
+const dshRoot = path.resolve(fileURLToPath(import.meta.url), "../../../..");
+let rpCache = new Map();
+let readCache = new Map();
+const origRealpathSync = fs.realpathSync;
+const origRealpathNative = origRealpathSync.native;
+const origReadFileSync = fs.readFileSync;
+
+// Short-lived startup caches eliminate thousands of redundant lstat/realpath and
+// package.json readFile syscalls during ESM resolution and preflight checks; both
+// hooks are torn down cleanly as soon as the core binds its HTTP port.
+const cachedRealpathSync = function (p, opts) {
+    if (rpCache && opts === undefined && typeof p === "string") {
+        let hit = rpCache.get(p);
+        if (hit !== undefined) return hit;
+        hit = origRealpathSync.call(this, p);
+        rpCache.set(p, hit);
+        return hit;
+    }
+    return origRealpathSync.call(this, p, opts);
+};
+Object.assign(cachedRealpathSync, origRealpathSync);
+if (typeof origRealpathNative === "function") {
+    cachedRealpathSync.native = function (p, opts) {
+        if (rpCache && opts === undefined && typeof p === "string") {
+            let hit = rpCache.get(p);
+            if (hit !== undefined) return hit;
+            hit = origRealpathNative.call(this, p);
+            rpCache.set(p, hit);
+            return hit;
+        }
+        return origRealpathNative.call(this, p, opts);
+    };
+}
+fs.realpathSync = cachedRealpathSync;
+
+fs.readFileSync = function (p, opts) {
+    if (readCache && (opts === "utf8" || opts === "utf-8") && typeof p === "string"
+            && p.startsWith(dshRoot) && p.endsWith("package.json")) {
+        let hit = readCache.get(p);
+        if (hit !== undefined) return hit;
+        hit = origReadFileSync.call(this, p, opts);
+        readCache.set(p, hit);
+        return hit;
+    }
+    return origReadFileSync.call(this, p, opts);
+};
+
+function restoreBootHooks() {
+    Error.stackTraceLimit = origStackLimit;
+    rpCache = null;
+    readCache = null;
+    fs.realpathSync = origRealpathSync;
+    fs.readFileSync = origReadFileSync;
+}
 
 let tModuleLoaded = tLine1;
 let moduleLoadMs = -1;
@@ -62,6 +131,7 @@ http.Server.prototype.listen = function wrappedListen(...args) {
                 return;
             }
             readyEmitted = true;
+            restoreBootHooks();
             const tListen = process.hrtime.bigint();
             const appInitMs = Number((tListen - tModuleLoaded) / 1_000_000n);
             const httpListenMs = Number((tListen - tLine1) / 1_000_000n);

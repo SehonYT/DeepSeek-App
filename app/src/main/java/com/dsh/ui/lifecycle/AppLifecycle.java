@@ -22,7 +22,9 @@ public final class AppLifecycle {
     }
 
     public static void trimMemory(int level, Handler handler, WebViewHost host) {
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_MODERATE && host != null) {
+        if ((level >= ComponentCallbacks2.TRIM_MEMORY_MODERATE
+                || level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL)
+                && host != null) {
             handler.post(new Runnable() {
                 @Override
                 public void run() {
