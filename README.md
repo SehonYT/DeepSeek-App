@@ -17,13 +17,20 @@ No PRoot, chroot, or virtualization overhead. DeepSeek runs **bare-metal inside 
 ### App Previews
 
 <p align="center">
-  <a href="docs/assets/preview_1.png"><img src="docs/assets/preview_1.png" width="200" alt="Agent Chat" title="Agent Chat" /></a>
-  <a href="docs/assets/preview_2.png"><img src="docs/assets/preview_2.png" width="200" alt="Workspaces & Sessions" title="Workspaces & Sessions" /></a>
-  <a href="docs/assets/preview_3.png"><img src="docs/assets/preview_3.png" width="200" alt="Integrated Terminal" title="Integrated Terminal" /></a>
+  <a href="docs/assets/preview_1.png"><img src="docs/assets/preview_1.png" width="220" alt="Agent Chat" title="Agent Chat" /></a>
+  <a href="docs/assets/preview_2.png"><img src="docs/assets/preview_2.png" width="220" alt="Workspaces & Sessions" title="Workspaces & Sessions" /></a>
 </p>
 
 <p align="center">
-  <sub>Agent Chat &bull; Workspaces &amp; Sessions &bull; Integrated Terminal</sub>
+  <sub>Agent Chat &bull; Workspaces &amp; Sessions</sub>
+</p>
+
+<p align="center">
+  <a href="docs/assets/preview_3.png"><img src="docs/assets/preview_3.png" width="220" alt="Integrated Terminal" title="Integrated Terminal" /></a>
+</p>
+
+<p align="center">
+  <sub>Integrated Terminal</sub>
 </p>
 
 ### Architecture
