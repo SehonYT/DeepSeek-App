@@ -73,6 +73,48 @@ def link_cli_node_modules(work_dir: str, cli_dir: str):
     print(f"[OK] Symlinked {linked} third-party entries into apps/cli/node_modules (zero duplication).")
 
 
+def _resolve_cjs_entry(pj: dict):
+    """Resolve a CJS-compatible entry for bundle.cjs, returning None for dual-mode ESM wrappers."""
+    exports = pj.get("exports")
+    if isinstance(exports, dict) and "." in exports:
+        dot = exports["."]
+        if isinstance(dot, str):
+            return dot
+        if isinstance(dot, dict):
+            # A package exposing both an ESM wrapper ("import") and a CJS entry
+            # ("require"/"default"/"node"), such as `ws`, cannot be collapsed into
+            # a single CJS file without breaking either `import Foo from "pkg"`
+            # (wrapper object replaces constructor, e.g. WebSocket.OPEN === undefined)
+            # or `import { Named } from "pkg"` (cjs-module-lexer misses re-exports).
+            if "import" in dot and any(k in dot for k in ("require", "default", "node")):
+                return None
+            for key in ("require", "node", "default", "import"):
+                cand = dot.get(key)
+                if isinstance(cand, str):
+                    return cand
+                if isinstance(cand, dict):
+                    for subkey in ("require", "default", "import"):
+                        sub = cand.get(subkey)
+                        if isinstance(sub, str):
+                            return sub
+            return None
+    return pj.get("main") or pj.get("module") or "index.js"
+
+
+def _cjs_bundle_breaks_default_export(bundle_path: str, entry: str, pj: dict) -> bool:
+    """Detect ESM-to-CJS wrappers (`__toCommonJS` exposing `default:`) that break ESM default imports."""
+    is_esm_entry = pj.get("type") == "module" or entry.endswith(".mjs")
+    if not is_esm_entry:
+        return False
+    try:
+        with open(bundle_path, "rb") as f:
+            data = f.read()
+        tail = data[-1024:].decode("utf-8", errors="ignore")
+        return "__toCommonJS" in data[:4096].decode("utf-8", errors="ignore") or "default:" in tail
+    except OSError:
+        return True
+
+
 def flatten_pure_js_packages(root_nm: str, iso_dir: str):
     """Optionally flatten heavy multi-file pure-JS dependencies with esbuild to cut stat()/open() storms."""
     esbuild_bin = shutil.which("esbuild")
@@ -87,7 +129,7 @@ def flatten_pure_js_packages(root_nm: str, iso_dir: str):
     # Only flatten self-contained pure-JS packages with simple single-entry main/default exports
     # and zero native addons, WASM assets, or dynamic worker files.
     candidates = [
-        "zod", "ajv", "yaml", "semver", "commander", "ws", "diff", "got",
+        "zod", "ajv", "yaml", "semver", "commander", "diff", "got",
         "execa", "chokidar", "undici", "turndown", "fuzzysort", "minisearch",
         "compression", "serve-static", "rrule", "shell-quote", "js-yaml",
         "@anthropic-ai/sdk", "@noble/hashes", "@js-temporal/polyfill",
@@ -114,17 +156,9 @@ def flatten_pure_js_packages(root_nm: str, iso_dir: str):
         if isinstance(exports, dict) and any(k.startswith("./") and k != "./package.json" for k in exports):
             continue
 
-        entry = None
-        if isinstance(exports, dict) and "." in exports:
-            dot = exports["."]
-            if isinstance(dot, str):
-                entry = dot
-            elif isinstance(dot, dict):
-                entry = dot.get("import") or dot.get("default") or dot.get("node") or dot.get("require")
-                if isinstance(entry, dict):
-                    entry = entry.get("default") or entry.get("import") or entry.get("require")
+        entry = _resolve_cjs_entry(pj)
         if not entry:
-            entry = pj.get("module") or pj.get("main") or "index.js"
+            continue
         entry_abs = os.path.normpath(os.path.join(pkg_dir, entry))
         if not os.path.isfile(entry_abs):
             continue
@@ -148,6 +182,12 @@ def flatten_pure_js_packages(root_nm: str, iso_dir: str):
         ]
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode != 0 or not os.path.isfile(bundle_out):
+            continue
+        if _cjs_bundle_breaks_default_export(bundle_out, entry, pj):
+            try:
+                os.remove(bundle_out)
+            except OSError:
+                pass
             continue
         # Replace package JS tree with single bundle.cjs + updated package.json
         for item in os.listdir(pkg_dir):

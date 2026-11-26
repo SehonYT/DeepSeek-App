@@ -116,18 +116,6 @@ public final class WebViewHost {
             public void run() {
                 try {
                     WebSettingsFactory.applyDesktopMode(webView, enabled);
-                    // reload() re-runs whatever URL the document currently has. When
-                    // that is still the tokenized entry URL, its 303 re-mints the
-                    // version-1 index cookie under the same cookie name, displacing the
-                    // version-2 operator credential that the Gateway stream and the
-                    // /api/remote.mux upgrade require. Re-minting after the reloaded
-                    // document has finished keeps one desktop-mode toggle from leaving
-                    // the sidebar on "Reconnecting" until the next full restart.
-                    String url = com.dsh.core.CoreRuntimeState.serverUrl;
-                    if (url != null && url.indexOf("token=") >= 0) {
-                        AgyWebViewClient.runAfterNextCoreLoad(
-                                () -> SessionCookiePrimer.mintApiCredentialAfterLoad(context, url));
-                    }
                     webView.reload();
                 } catch (Throwable t) {
                     android.util.Log.w("WebViewHost", "desktop mode reload failed: " + t.getMessage());

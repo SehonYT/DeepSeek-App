@@ -34,12 +34,6 @@ import java.util.concurrent.Executors;
 public final class SessionCookiePrimer {
 
     private static final String TAG = "SessionCookiePrimer";
-    /** Launch URL already exchanged for an operator credential, so retries never stack peers. */
-    private static volatile String sMintedFor = "";
-    /** When that credential was minted; bounds the dedupe window. */
-    private static volatile long sMintedAtMs = 0L;
-    /** A reload must be able to replace its version-1 cookie, so dedupe is time-bounded. */
-    private static final long MINT_DEBOUNCE_MS = 4000L;
     private static final ExecutorService POOL = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "SessionCookiePrimer");
         t.setDaemon(true);
@@ -89,58 +83,6 @@ public final class SessionCookiePrimer {
         });
     }
 
-    /**
-     * Mints the version-2 operator credential AFTER the UI document has loaded.
-     *
-     * <p>Ordering matters: loading the tokenized URL makes the WebView perform its own
-     * index exchange, which writes a version-1 cookie under the SAME cookie name. Doing
-     * the {@code /connect} exchange first would have that write overwrite the operator
-     * credential. Running it afterwards leaves the version-2 credential in place, which
-     * is what the Gateway event stream and the {@code /api/remote.mux} upgrade require;
-     * the page document itself keeps working because a loopback authority is admitted
-     * without any cookie at all.</p>
-     *
-     * <p>Never throws and never blocks a caller on the main thread.</p>
-     */
-    public static void mintApiCredentialAfterLoad(Context context, String tokenizedUrl) {
-        final Context app = context == null ? null
-                : (context.getApplicationContext() != null ? context.getApplicationContext() : context);
-        if (app == null || tokenizedUrl == null || tokenizedUrl.isEmpty()) {
-            return;
-        }
-        POOL.execute(() -> {
-            try {
-                String origin = originOf(tokenizedUrl);
-                if (origin == null) {
-                    return;
-                }
-                // Each /connect call publishes a NEW operator peer, and a peer is only
-                // released once a socket binds to it. Minting on every load would leave
-                // unused peers alive forever, so a credential is minted at most once per
-                // launch URL: the delayed retry exists only to recover from a mint that
-                // failed, not to mint a second credential for the same page.
-                // Deduplicate only the bursting retries of ONE load attempt. Forcing a
-                // re-mint after a reload must still be able to replace a version-1
-                // cookie that the reloaded document just wrote over the credential, so
-                // the guard expires: it suppresses only mints inside a short window.
-                long now = System.currentTimeMillis();
-                if (sMintedFor.equals(tokenizedUrl) && now - sMintedAtMs < MINT_DEBOUNCE_MS) {
-                    Log.i(TAG, "operator credential already minted for this launch URL");
-                    return;
-                }
-                int installed = installApiCredential(origin, tokenizedUrl);
-                if (installed > 0) {
-                    sMintedFor = tokenizedUrl;
-                    sMintedAtMs = now;
-                }
-                Log.i(TAG, "post-load api credential installed=" + installed);
-            } catch (Throwable t) {
-                Log.w(TAG, "post-load credential mint failed: " + t.getClass().getSimpleName()
-                        + ": " + t.getMessage());
-            }
-        });
-    }
-
     private static boolean exchange(Context context, String tokenizedUrl)
             throws java.io.IOException {
         if (tokenizedUrl == null || tokenizedUrl.isEmpty()) {
@@ -174,9 +116,6 @@ public final class SessionCookiePrimer {
                 }
             }
             Log.i(TAG, "token exchange status=" + code + " cookiesInstalled=" + stored);
-            // Only the version-1 index credential is minted here. The version-2
-            // operator credential is minted AFTER the page load, because both share
-            // one cookie name and the page's own index exchange would overwrite it.
             return stored > 0;
         } finally {
             if (conn != null) {
@@ -187,69 +126,6 @@ public final class SessionCookiePrimer {
                     }
                 } catch (Throwable ignored) {
                 }
-                conn.disconnect();
-            }
-        }
-    }
-
-    /**
-     * Performs the {@code GET /connect?token=...&interactions=answer} exchange and
-     * installs the resulting version-2 operator credential in the platform jar.
-     *
-     * <p>The server answers 302 to {@code ./api/remote.mux}; redirects are never
-     * followed, because the credential is on that response's {@code Set-Cookie}
-     * header and following it would only open a socket nobody reads.</p>
-     *
-     * <p>Only one live socket per operator is allowed, so this is called exactly once
-     * per prime; it never creates a second credential for the same page.</p>
-     *
-     * @return 1 when a cookie was installed, 0 otherwise.
-     */
-    private static int installApiCredential(String origin, String tokenizedUrl) {
-        HttpURLConnection conn = null;
-        try {
-            int query = tokenizedUrl.indexOf("token=");
-            if (query < 0 || origin == null) {
-                return 0;
-            }
-            String token = tokenizedUrl.substring(query + "token=".length());
-            int amp = token.indexOf('&');
-            if (amp >= 0) {
-                token = token.substring(0, amp);
-            }
-            if (token.isEmpty()) {
-                return 0;
-            }
-            String connectUrl = origin + "/connect?token=" + token + "&interactions=answer";
-            conn = (HttpURLConnection) new URL(connectUrl).openConnection();
-            conn.setConnectTimeout(4000);
-            conn.setReadTimeout(4000);
-            conn.setInstanceFollowRedirects(false);
-            conn.setRequestMethod("GET");
-            int code = conn.getResponseCode();
-            int stored = 0;
-            Map<String, List<String>> headers = conn.getHeaderFields();
-            if (headers != null) {
-                for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
-                    String name = entry.getKey();
-                    if (name == null || !"set-cookie".equalsIgnoreCase(name)) {
-                        continue;
-                    }
-                    for (String value : entry.getValue()) {
-                        stored += installCookie(origin, value);
-                    }
-                }
-            }
-            Log.i(TAG, "connect exchange status=" + code + " cookiesInstalled=" + stored);
-            return stored > 0 ? 1 : 0;
-        } catch (Throwable t) {
-            // Fail-open: without the credential the page still loads and HTTP keeps
-            // working; only the event stream stays unconnected, as before this fix.
-            Log.w(TAG, "connect exchange failed: " + t.getClass().getSimpleName()
-                    + ": " + t.getMessage());
-            return 0;
-        } finally {
-            if (conn != null) {
                 conn.disconnect();
             }
         }

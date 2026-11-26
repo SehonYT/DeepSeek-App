@@ -467,9 +467,6 @@ public class MainActivity extends Activity
                 loadedGeneration = -1;
                 splashDismissed = false;
                 lastStatusKey = null;
-                // A mint queued for the dead document would otherwise fire against
-                // whichever page the replacement WebView finishes loading first.
-                com.dsh.ui.webview.AgyWebViewClient.runAfterNextCoreLoad(null);
                 try {
                     webViewHost = new WebViewHost(MainActivity.this, themeManager, oauthManager,
                             androidBridge, MainActivity.this);
@@ -497,11 +494,9 @@ public class MainActivity extends Activity
      * Reloads the UI at a newly published core URL.
      *
      * <p>Goes through {@link WebViewHost#loadApp()} rather than loading the URL
-     * directly, so the same ordering as the first load is preserved: the version-1
-     * index credential is established by the document load, and only then is the
-     * version-2 operator credential minted. Loading the URL directly here would skip
-     * the post-load mint, leaving the Gateway event stream unable to authenticate and
-     * the sidebar stuck on "Reconnecting".</p>
+     * directly, so {@link com.dsh.ui.webview.SessionCookiePrimer} runs its pre-load
+     * session cookie priming for the newly published token/generation just as on the
+     * first load.</p>
      */
     public void loadDeepSeekUrl(final String url) {
         handler.post(new Runnable() {
@@ -512,7 +507,7 @@ public class MainActivity extends Activity
                 }
                 splash.clearFatal();
                 // loadApp() re-reads CoreRuntimeState.serverUrl, which the caller has
-                // already updated; it performs the prime/mint sequence itself.
+                // already updated, and runs SessionCookiePrimer before loading the page.
                 if (!webViewHost.loadApp()) {
                     return;
                 }
@@ -592,9 +587,6 @@ public class MainActivity extends Activity
         // onDestroy previously left it queued, so a finishing activity kept a
         // self-perpetuating main-thread task (and its captured Activity) alive.
         handler.removeCallbacks(pollServer);
-        // A mint queued for a document this activity will never finish loading must
-        // not fire against the next activity's page.
-        com.dsh.ui.webview.AgyWebViewClient.runAfterNextCoreLoad(null);
         if (splash != null) {
             splash.destroy();
         }

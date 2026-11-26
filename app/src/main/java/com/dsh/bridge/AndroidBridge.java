@@ -60,9 +60,34 @@ public final class AndroidBridge {
                 ? activityRef.get() : activityRef == null ? null : activityRef.get();
         android.content.Context app = ctx != null ? ctx.getApplicationContext() : null;
         if (app != null) {
-            com.dsh.ui.webview.NetProbe.record(app, "page", false, -1, -1L, info);
+            long http = parsePageProbeStatus(info);
+            boolean reachable = (http == 200L || http == 404L);
+            com.dsh.ui.webview.NetProbe.record(app, "page", reachable, http, -1L, info);
         } else {
             android.util.Log.i("PageProbe", String.valueOf(info));
+        }
+    }
+
+    private static long parsePageProbeStatus(String info) {
+        if (info == null) {
+            return -1L;
+        }
+        int idx = info.indexOf("apiStatus=");
+        if (idx < 0) {
+            return -1L;
+        }
+        int start = idx + "apiStatus=".length();
+        int end = start;
+        while (end < info.length() && Character.isDigit(info.charAt(end))) {
+            end++;
+        }
+        if (end == start) {
+            return -1L;
+        }
+        try {
+            return Long.parseLong(info.substring(start, end));
+        } catch (NumberFormatException ignored) {
+            return -1L;
         }
     }
 
