@@ -38,6 +38,31 @@ public final class AgyWebViewClient extends WebViewClient {
         this.listener = listener;
     }
 
+    /**
+     * Handles the WebView renderer process being killed (low memory, a GPU fault, or
+     * the system reclaiming it). Without an implementation the platform returns false,
+     * and an app that keeps using the dead WebView gets a frozen, unresponsive surface
+     * with no way back: exactly the "the app is unresponsive" symptom. Destroying the
+     * dead view and reloading the authenticated URL restores the UI in place.
+     *
+     * @return true because this callback consumed the event and the app recovers.
+     */
+    @Override
+    public boolean onRenderProcessGone(WebView view,
+                                       android.webkit.RenderProcessGoneDetail detail) {
+        boolean didCrash = detail != null && detail.didCrash();
+        Log.w(TAG, "WebView renderer gone (didCrash=" + didCrash + "); recreating the UI");
+        try {
+            com.dsh.ui.webview.NetProbe.record(context, "rendererGone", false, -1, -1L,
+                    "didCrash=" + didCrash);
+        } catch (Throwable ignored) {
+        }
+        if (listener != null) {
+            listener.onRendererGone();
+        }
+        return true;
+    }
+
     @Override
     public void onReceivedError(WebView v, WebResourceRequest req, WebResourceError err) {
         if (req != null && req.isForMainFrame()) {

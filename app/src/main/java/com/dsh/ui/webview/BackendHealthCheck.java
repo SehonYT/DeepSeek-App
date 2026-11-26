@@ -76,6 +76,71 @@ public final class BackendHealthCheck {
         // Control: same request without the cookie (documents the expected 401).
         probeUrl(context, stage + ":apiNoCookie",
                 "http://127.0.0.1:" + port + "/api", null);
+
+        // The UI's "Reconnecting" state comes from the Gateway WebSocket, and no
+        // probe has ever exercised it. Send a real RFC6455 handshake with the jar
+        // cookie and record the status line: 101 means the upgrade was accepted,
+        // 401/403 means admission failed, 404 means the upgrade route was never
+        // registered, 409 means a previous socket for this peer is still open.
+        probeWebSocket(context, stage + ":mux", port, jarCookie);
+    }
+
+    /**
+     * Performs a raw WebSocket upgrade request against the Gateway stream mux and
+     * records the HTTP status of the handshake. Uses a plain socket so no WebSocket
+     * client library or TLS setup is involved.
+     */
+    private static void probeWebSocket(Context context, String stage, int port, String cookie) {
+        java.net.Socket socket = null;
+        long started = SystemClock.elapsedRealtime();
+        try {
+            socket = new java.net.Socket();
+            socket.connect(new java.net.InetSocketAddress("127.0.0.1", port), 4000);
+            socket.setSoTimeout(4000);
+            StringBuilder req = new StringBuilder();
+            req.append("GET /api/remote.mux HTTP/1.1\r\n");
+            req.append("Host: 127.0.0.1:").append(port).append("\r\n");
+            req.append("Upgrade: websocket\r\n");
+            req.append("Connection: Upgrade\r\n");
+            req.append("Sec-WebSocket-Version: 13\r\n");
+            req.append("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n");
+            req.append("Origin: http://127.0.0.1:").append(port).append("\r\n");
+            if (cookie != null) {
+                req.append("Cookie: ").append(cookie).append("\r\n");
+            }
+            req.append("\r\n");
+            socket.getOutputStream().write(req.toString().getBytes("UTF-8"));
+            socket.getOutputStream().flush();
+            java.io.InputStream in = socket.getInputStream();
+            byte[] buf = new byte[256];
+            int n = in.read(buf);
+            long rtt = SystemClock.elapsedRealtime() - started;
+            String head = n > 0 ? new String(buf, 0, n, "UTF-8") : "";
+            int eol = head.indexOf("\r\n");
+            String statusLine = eol > 0 ? head.substring(0, eol) : head.replace(' ', ' ').trim();
+            int code = -1;
+            try {
+                String[] parts = statusLine.split(" ");
+                if (parts.length > 1) {
+                    code = Integer.parseInt(parts[1]);
+                }
+            } catch (Throwable ignored) {
+            }
+            NetProbe.record(context, stage, code == 101, code, rtt,
+                    "sentCookie=" + (cookie != null) + " status=\"" + statusLine + "\"");
+        } catch (Throwable t) {
+            NetProbe.record(context, stage, false, -1,
+                    SystemClock.elapsedRealtime() - started,
+                    "sentCookie=" + (cookie != null) + " error="
+                            + t.getClass().getSimpleName() + ": " + t.getMessage());
+        } finally {
+            if (socket != null) {
+                try {
+                    socket.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
     }
 
     private static String cookieJar(int port) {

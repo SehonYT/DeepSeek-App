@@ -420,6 +420,57 @@ public class MainActivity extends Activity
         }
     }
 
+    /**
+     * The WebView renderer process died. Its surface is permanently dead, so the
+     * only recovery is to discard the whole host (and its view) and let the next
+     * poll recreate and reload it. Without this the app keeps drawing a destroyed
+     * surface and appears frozen.
+     */
+    @Override
+    public void onRendererGone() {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                Log.w(TAG, "recreating WebViewHost after renderer death");
+                try {
+                    if (rootLayout != null && webViewHost != null
+                            && webViewHost.getWebView() != null) {
+                        rootLayout.removeView(webViewHost.getWebView());
+                    }
+                    if (webViewHost != null) {
+                        webViewHost.getWebView().destroy();
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "cannot dispose dead WebView: " + t.getMessage());
+                }
+                webViewHost = null;
+                appLoaded = false;
+                loadedGeneration = -1;
+                splashDismissed = false;
+                lastStatusKey = null;
+                try {
+                    webViewHost = new WebViewHost(MainActivity.this, themeManager, oauthManager,
+                            androidBridge, MainActivity.this);
+                    webViewHost.setListener(MainActivity.this);
+                    if (rootLayout != null) {
+                        // Insert UNDER the splash overlay: the splash is already the
+                        // top-most child, and adding the WebView last would hide the
+                        // loading state behind a dead (not yet loaded) surface.
+                        rootLayout.addView(webViewHost.getWebView(), 0, ViewParams.full());
+                    }
+                    splash.showLoading();
+                    splash.showStatus("Reloading interface...");
+                } catch (Throwable t) {
+                    Log.e(TAG, "cannot recreate WebView: " + t.getMessage(), t);
+                    showFatalError("interface process crashed and could not be restarted");
+                    return;
+                }
+                handler.removeCallbacks(pollServer);
+                pollServer.run();
+            }
+        });
+    }
+
     public void loadDeepSeekUrl(final String url) {
         handler.post(new Runnable() {
             @Override
