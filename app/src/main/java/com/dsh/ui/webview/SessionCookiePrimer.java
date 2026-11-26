@@ -34,6 +34,12 @@ import java.util.concurrent.Executors;
 public final class SessionCookiePrimer {
 
     private static final String TAG = "SessionCookiePrimer";
+    /** Launch URL already exchanged for an operator credential, so retries never stack peers. */
+    private static volatile String sMintedFor = "";
+    /** When that credential was minted; bounds the dedupe window. */
+    private static volatile long sMintedAtMs = 0L;
+    /** A reload must be able to replace its version-1 cookie, so dedupe is time-bounded. */
+    private static final long MINT_DEBOUNCE_MS = 4000L;
     private static final ExecutorService POOL = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "SessionCookiePrimer");
         t.setDaemon(true);
@@ -105,10 +111,29 @@ public final class SessionCookiePrimer {
         POOL.execute(() -> {
             try {
                 String origin = originOf(tokenizedUrl);
-                if (origin != null) {
-                    int installed = installApiCredential(origin, tokenizedUrl);
-                    Log.i(TAG, "post-load api credential installed=" + installed);
+                if (origin == null) {
+                    return;
                 }
+                // Each /connect call publishes a NEW operator peer, and a peer is only
+                // released once a socket binds to it. Minting on every load would leave
+                // unused peers alive forever, so a credential is minted at most once per
+                // launch URL: the delayed retry exists only to recover from a mint that
+                // failed, not to mint a second credential for the same page.
+                // Deduplicate only the bursting retries of ONE load attempt. Forcing a
+                // re-mint after a reload must still be able to replace a version-1
+                // cookie that the reloaded document just wrote over the credential, so
+                // the guard expires: it suppresses only mints inside a short window.
+                long now = System.currentTimeMillis();
+                if (sMintedFor.equals(tokenizedUrl) && now - sMintedAtMs < MINT_DEBOUNCE_MS) {
+                    Log.i(TAG, "operator credential already minted for this launch URL");
+                    return;
+                }
+                int installed = installApiCredential(origin, tokenizedUrl);
+                if (installed > 0) {
+                    sMintedFor = tokenizedUrl;
+                    sMintedAtMs = now;
+                }
+                Log.i(TAG, "post-load api credential installed=" + installed);
             } catch (Throwable t) {
                 Log.w(TAG, "post-load credential mint failed: " + t.getClass().getSimpleName()
                         + ": " + t.getMessage());
