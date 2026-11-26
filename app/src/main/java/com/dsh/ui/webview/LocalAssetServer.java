@@ -59,7 +59,12 @@ public final class LocalAssetServer {
                 String encoding = MimeTypes.isTextMime(mime) ? "UTF-8" : null;
                 Map<String, String> headers = new HashMap<>();
                 headers.put("Access-Control-Allow-Origin", "*");
-                headers.put("Cache-Control", "public, max-age=31536000, immutable");
+                // Only revalidate, never pin. These files are re-staged from the APK
+                // on every install, so an "immutable, max-age=31536000" header (the
+                // previous value) let a WebView keep serving the *old* index.html and
+                // bundles after an app update -- a stale document against a newer
+                // core is exactly how the UI ends up loading but never authenticating.
+                headers.put("Cache-Control", "no-cache, must-revalidate");
                 headers.put("Content-Length", String.valueOf(target.length()));
                 InputStream bis = new BufferedInputStream(new FileInputStream(target), 64 * 1024);
                 return new WebResourceResponse(mime, encoding, 200, "OK", headers, bis);

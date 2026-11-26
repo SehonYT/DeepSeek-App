@@ -101,7 +101,8 @@ public final class WebViewHost {
     }
 
     /** Loads our asset UI with the app config injected ahead of every app script. */
-    public void loadApp() {
-        AppLoader.load(context, webView, theme, bridge);
+    /** @return true when the authenticated URL was handed to the WebView. */
+    public boolean loadApp() {
+        return AppLoader.load(context, webView, theme, bridge);
     }
 }

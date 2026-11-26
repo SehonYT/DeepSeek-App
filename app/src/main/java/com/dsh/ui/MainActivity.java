@@ -167,6 +167,13 @@ public class MainActivity extends Activity
         if (CoreRuntimeState.serverUrl != null && webViewHost != null) {
             int generation = CoreRuntimeState.readyGeneration;
             if (!appLoaded || (loadedGeneration > 0 && generation != loadedGeneration)) {
+                // Only treat the UI as loaded once the loader actually accepted the
+                // URL. loadApp() refuses an un-authenticated URL (no "?token="), and
+                // setting appLoaded first would have hidden the splash and left a
+                // blank screen with no way back.
+                if (!webViewHost.loadApp()) {
+                    return;
+                }
                 appLoaded = true;
                 loadedGeneration = generation;
                 splash.clearFatal();
@@ -232,10 +239,17 @@ public class MainActivity extends Activity
         // frozen for most of the boot; ticking proves the app is still working.
         long phaseSeconds = Math.max(0L, BootMetrics.phaseElapsedMs()) / 1000L;
         String elapsed = phaseSeconds >= 3 ? " (" + phaseSeconds + "s)" : "";
+        // First run (and every run after an app update) must unpack the userspace
+        // and the runtime before node can start, which is the slow case. Say so up
+        // front instead of showing an unexplained multi-second spinner; later boots
+        // take the warm path and skip the install entirely.
+        boolean firstRun = BootMetrics.wasColdInstall();
         String text;
         switch (phase) {
             case BootMetrics.PHASE_CORE_STARTING:
-                text = "Starting engine..." + elapsed;
+                text = firstRun
+                        ? "First launch: preparing the environment, this can take a while..." + elapsed
+                        : "Starting engine..." + elapsed;
                 break;
             case BootMetrics.PHASE_LOADING_UI:
                 text = "Loading interface..." + elapsed;

@@ -44,6 +44,23 @@ public final class LogRingBuffer {
     private final int capacity;
     private final LinkedList<LogEntry> buffer = new LinkedList<>();
 
+    /**
+     * Process-wide buffer the core supervisor logs into. The WebView console and
+     * other UI-side diagnostics append here too, so an exported report contains the
+     * browser stack (e.g. a refused WebSocket) next to the core log -- previously
+     * JS errors reached logcat only, which is unreadable without a PC.
+     */
+    private static volatile LogRingBuffer sShared;
+
+    /** The shared instance, or null before the core service creates it. */
+    public static LogRingBuffer shared() {
+        return sShared;
+    }
+
+    public static void installShared(LogRingBuffer buffer) {
+        sShared = buffer;
+    }
+
     public LogRingBuffer() {
         this(DEFAULT_CAPACITY);
     }

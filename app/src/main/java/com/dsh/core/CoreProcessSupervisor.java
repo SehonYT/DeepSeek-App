@@ -5,7 +5,6 @@ import android.text.TextUtils;
 import android.util.Log;
 
 import com.dsh.runtime.RuntimeManager;
-import com.dsh.util.CoreUrl;
 import com.dsh.util.ErrorText;
 import com.dsh.util.ProcessUtils;
 import com.dsh.util.SensitiveDataRedactor;
@@ -30,6 +29,9 @@ import java.io.Writer;
 public final class CoreProcessSupervisor {
 
     private static final String TAG = "CoreProcessSupervisor";
+
+    /** Log once when the port is open but the tokenized entry URL has not been announced. */
+    private static final long TOKEN_URL_WAIT_NOTE_MS = 3000L;
 
     private final Context appContext;
     private final RuntimeManager runtime;
@@ -310,6 +312,9 @@ public final class CoreProcessSupervisor {
     private boolean waitForReady(Process proc, Writer log) {
         long start = System.currentTimeMillis();
         long tcpOpenAt = -1L;
+        // One-time (per wait) note that the socket is open but the authenticated
+        // URL has not been announced yet; see the token URL branch below.
+        boolean tokenWaitNoted = false;
         int port = CoreRuntimeState.httpsPort;
         long budget = lastReadyBudgetMs = CoreReadyProbe.readyBudgetMs();
         long hardDeadline = start + CoreReadyProbe.READY_TIMEOUT_MAX_MS;
@@ -350,31 +355,37 @@ public final class CoreProcessSupervisor {
                 tcpOpenAt = System.currentTimeMillis();
                 detected = CoreRuntimeState.detectedWebUrl;
             }
-            if (tcpOpenAt >= 0) {
-                if (detected != null && !detected.isEmpty()) {
-                    CoreRuntimeState.serverUrl = detected;
-                    CoreRuntimeState.lastError = null;
-                    CoreRuntimeState.restarting = false;
-                    CoreRuntimeState.readyGeneration++;
-                    lastReadyBudgetMs = budget;
-                    BootMetrics.markCoreReady();
-                    String readyStatus = "core ready on 127.0.0.1:" + port + " (tokenized URL)";
-                    Log.i(TAG, readyStatus);
-                    CoreLogWriter.writeLine(log, readyStatus);
-                    return true;
-                }
-                if (System.currentTimeMillis() - tcpOpenAt >= 500L) {
-                    CoreRuntimeState.serverUrl = CoreUrl.startUrl(port);
-                    CoreRuntimeState.lastError = null;
-                    CoreRuntimeState.restarting = false;
-                    CoreRuntimeState.readyGeneration++;
-                    lastReadyBudgetMs = budget;
-                    BootMetrics.markCoreReady();
-                    String readyStatus = "core ready on 127.0.0.1:" + port + " (fallback URL)";
-                    Log.i(TAG, readyStatus);
-                    CoreLogWriter.writeLine(log, readyStatus);
-                    return true;
-                }
+            if (tcpOpenAt >= 0 && detected != null && !detected.isEmpty()) {
+                CoreRuntimeState.serverUrl = detected;
+                CoreRuntimeState.lastError = null;
+                CoreRuntimeState.restarting = false;
+                CoreRuntimeState.readyGeneration++;
+                lastReadyBudgetMs = budget;
+                BootMetrics.markCoreReady();
+                String readyStatus = "core ready on 127.0.0.1:" + port + " (tokenized URL)";
+                Log.i(TAG, readyStatus);
+                CoreLogWriter.writeLine(log, readyStatus);
+                return true;
+            }
+            // NEVER publish an un-tokenized URL. The core's token authentication
+            // mints its session cookie only for a GET /?token=<launch token>
+            // request and answers every other index request with 401, so a bare
+            // http://127.0.0.1:<port>/ would load a document that can never
+            // authenticate: the UI renders, the WebSocket to /api/remote.mux is
+            // refused, and the sidebar sits on "Reconnecting" forever.
+            //
+            // The token line ("dsh web: http://.../?token=...") is printed only
+            // after the loader has settled every plugin, which is seconds after
+            // the socket starts listening. So the port being open is NOT
+            // readiness; wait for the tokenized URL itself. The readiness budget
+            // above still bounds the wait and fails closed with a real error.
+            if (tcpOpenAt >= 0 && !tokenWaitNoted
+                    && System.currentTimeMillis() - tcpOpenAt >= TOKEN_URL_WAIT_NOTE_MS) {
+                tokenWaitNoted = true;
+                String note = "port " + port + " is listening; waiting for the authenticated "
+                        + "URL from the core (plugins still loading)";
+                Log.i(TAG, note);
+                CoreLogWriter.writeLine(log, note);
             }
             synchronized (readyLock) {
                 if (!stopping && CoreRuntimeState.detectedWebUrl == null && ProcessUtils.isAlive(proc)) {
@@ -388,8 +399,18 @@ public final class CoreProcessSupervisor {
             }
         }
         long waitedMs = System.currentTimeMillis() - start;
-        String timeoutNote = "waitForReady timed out after " + waitedMs + "ms"
-                + " (base=" + CoreReadyProbe.readyBudgetMs() + "ms, extensions=" + extensions
+        // Distinguish the two failure shapes: the port never opened (core did not
+        // come up) versus the port opened but the authenticated entry URL was never
+        // announced (a plugin failed to load, so announceReady never ran). The
+        // second is a real error the user must see; guessing a bare URL there is
+        // what produced an authenticated-looking but dead UI.
+        String timeoutNote = (tcpOpenAt >= 0
+                ? "core listened on 127.0.0.1:" + port
+                        + " but never announced the authenticated entry URL"
+                        + " (a startup plugin failed to load; check the log above)"
+                : "core did not start")
+                + " after " + waitedMs + "ms (base=" + CoreReadyProbe.readyBudgetMs()
+                + "ms, extensions=" + extensions
                 + ", recentOutput=" + isMakingProgress(System.currentTimeMillis()) + ")";
         Log.w(TAG, timeoutNote);
         CoreLogWriter.writeLine(log, timeoutNote);

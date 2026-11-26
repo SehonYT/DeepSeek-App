@@ -40,12 +40,25 @@ public final class AgyWebChromeClient extends WebChromeClient {
             int line = cm.lineNumber();
             ConsoleMessage.MessageLevel lvl = cm.messageLevel();
             String tag = "AGY_JS";
+            String level = "INFO";
             if (lvl == ConsoleMessage.MessageLevel.ERROR) {
                 Log.e(tag, "[" + src + ":" + line + "] " + msg);
+                level = "ERROR";
             } else if (lvl == ConsoleMessage.MessageLevel.WARNING) {
                 Log.w(tag, "[" + src + ":" + line + "] " + msg);
+                level = "WARN";
             } else {
                 Log.i(tag, "[" + src + ":" + line + "] " + msg);
+            }
+            // Mirror into the exportable ring buffer. Without this the browser-side
+            // cause of a UI failure (refused WebSocket, failed fetch, CSP block)
+            // stayed in logcat, so an exported report showed only the native side.
+            if (lvl == ConsoleMessage.MessageLevel.ERROR
+                    || lvl == ConsoleMessage.MessageLevel.WARNING) {
+                com.dsh.log.LogRingBuffer shared = com.dsh.log.LogRingBuffer.shared();
+                if (shared != null) {
+                    shared.append("web", level, "[" + src + ":" + line + "] " + msg);
+                }
             }
         }
         return true;

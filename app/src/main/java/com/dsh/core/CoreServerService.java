@@ -37,6 +37,7 @@ public final class CoreServerService extends Service {
         BootMetrics.markServiceStart();
         runtime = new RuntimeManager(this);
         logBuffer = new com.dsh.log.LogRingBuffer();
+        com.dsh.log.LogRingBuffer.installShared(logBuffer);
         gatewayServer = new com.dsh.gateway.SystemGatewayServer(this, logBuffer, com.dsh.BuildConfig.GATEWAY_PORT);
         gatewayServer.start();
 
