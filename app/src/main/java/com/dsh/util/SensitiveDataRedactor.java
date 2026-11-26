@@ -48,6 +48,26 @@ public final class SensitiveDataRedactor {
         }
     }
 
+    /**
+     * Reduces every URL in free text to scheme://host:port without touching any other
+     * key/value pair. Used by diagnostics that must keep their own field names: the
+     * full {@link #redactLine} treats {@code cookie=} and {@code *token=} as credential
+     * fields and deletes the rest of the line, which erases the very facts a probe
+     * report exists to capture.
+     */
+    public static String safeUrlInText(String text) {
+        if (text == null || text.isEmpty()) {
+            return text;
+        }
+        Matcher urls = URL.matcher(text);
+        StringBuffer output = new StringBuffer();
+        while (urls.find()) {
+            urls.appendReplacement(output, Matcher.quoteReplacement(safeUrl(urls.group())));
+        }
+        urls.appendTail(output);
+        return output.toString();
+    }
+
     /** Redacts full URL paths and sensitive token fields embedded in arbitrary log text. */
     public static String redactLine(String line) {
         if (line == null || line.isEmpty()) {

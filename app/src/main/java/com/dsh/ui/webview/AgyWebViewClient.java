@@ -210,15 +210,29 @@ public final class AgyWebViewClient extends WebViewClient {
      * origin), and that difference is invisible from either side alone.
      */
     private void probePageConnectivity(WebView v) {
+        // Report the exact facts needed to separate "the page cannot authenticate"
+        // from "the page is not even talking to the core": the document base,
+        // location.href, whether the launch URL still carries a token, the cookie
+        // jar (HttpOnly cookies are invisible to document.cookie), and the real
+        // status/URL of the API call.
         String js = "(function(){try{"
                 + "var done=function(s){try{if(window.Android&&window.Android.onPageProbe){"
                 + "window.Android.onPageProbe(String(s));}}catch(e){}};"
-                + "var base=document.baseURI||'';"
-                + "var info='base='+base+';cookie='+(document.cookie?'present':'empty')+';';"
+                + "var b=document.baseURI||'';"
+                + "var h=location.href||'';"
+                + "var parts=[];"
+                + "parts.push('base='+b);"
+                + "parts.push('href='+h);"
+                + "parts.push('hrefHasToken='+(h.indexOf('token=')>=0));"
+                + "parts.push('docCookieLen='+((document.cookie||'').length));"
                 + "fetch('api',{method:'GET',credentials:'include',cache:'no-store'})"
                 + ".then(function(r){return r.text().then(function(t){"
-                + "done(info+'fetch_api='+r.status+' body='+String(t).slice(0,160));});})"
-                + ".catch(function(e){done(info+'fetch_error='+(e&&e.message?e.message:e));});"
+                + "parts.push('apiStatus='+r.status);"
+                + "parts.push('apiUrl='+r.url);"
+                + "parts.push('apiRedirected='+r.redirected);"
+                + "parts.push('apiBody='+String(t).replace(/\\s+/g,' ').slice(0,120));"
+                + "done(parts.join(' '));});})"
+                + ".catch(function(e){parts.push('apiError='+(e&&e.name?e.name+':'+e.message:e));done(parts.join(' '));});"
                 + "}catch(e){}})();";
         try {
             v.evaluateJavascript(js, null);

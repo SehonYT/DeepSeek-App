@@ -42,7 +42,24 @@ public final class AppLoader {
         }
         Log.i(TAG, "Loading DeepSeek application URL: "
                 + com.dsh.util.SensitiveDataRedactor.safeUrl(appUrl));
-        webView.loadUrl(appUrl);
+
+        // Exchange the launch token for the core's session cookie natively, install
+        // it in the platform jar, and only then load. Relying on the WebView to keep
+        // a Set-Cookie riding a 303 redirect is not reliable across WebView builds:
+        // when that cookie is dropped the page still renders, but every /api call and
+        // the WebSocket come back 401, which the UI shows as a permanent
+        // "Reconnecting" sidebar. The tokenized URL is loaded regardless of the
+        // outcome, so a failed priming degrades to the previous behaviour.
+        final WebView target = webView;
+        final String url = appUrl;
+        SessionCookiePrimer.prime(context, appUrl, cookieInstalled -> {
+            Log.i(TAG, "loading UI (sessionCookiePrimed=" + cookieInstalled + ")");
+            try {
+                target.loadUrl(url);
+            } catch (Throwable t) {
+                Log.w(TAG, "loadUrl failed: " + t.getMessage());
+            }
+        });
         return true;
     }
 }

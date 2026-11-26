@@ -188,9 +188,11 @@ public class MainActivity extends Activity
                 }
                 appLoadedAtUptime = SystemClock.elapsedRealtime();
                 BootMetrics.setPhase(BootMetrics.PHASE_LOADING_UI);
-                // Load immediately on serverUrl: the WebView starts fetching the
-                // instant the port is listening, in parallel with the splash fade.
-                webViewHost.loadApp();
+                // NOTE: loadApp() was already called above, before appLoaded was set.
+                // Calling it a second time here started a SECOND navigation to the
+                // same URL; the first document (and any WebSocket it had opened) was
+                // torn down mid-handshake by the second load. A torn-down /api
+                // connection is exactly what the sidebar reports as "Reconnecting".
                 handler.removeCallbacks(splashWatchdog);
                 handler.postDelayed(splashWatchdog, SPLASH_WATCHDOG_MS);
                 handler.removeCallbacks(statusTicker);

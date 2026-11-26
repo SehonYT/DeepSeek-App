@@ -4,6 +4,8 @@ import android.content.Context;
 import android.os.Environment;
 import android.util.Log;
 
+import android.webkit.CookieManager;
+
 import com.dsh.core.CoreRuntimeState;
 import com.dsh.util.SensitiveDataRedactor;
 
@@ -24,6 +26,12 @@ import java.util.Locale;
  * <p>Two files are written to shared storage, which Termux can read:
  * {@code Download/deepseek-netprobe.json} (machine readable, overwritten) and an
  * appended line in {@code Download/deepseek-netprobe.log}.</p>
+ *
+ * <p>The {@code detail} field is diagnostic text only. It is written verbatim
+ * because the generic line redactor treats {@code cookie=} as a credential field
+ * and deletes everything after it, which previously erased exactly the fields this
+ * report exists to capture. Secrets never enter this field: URLs are reduced to
+ * scheme://host:port and the cookie report is a boolean plus a count.</p>
  */
 public final class NetProbe {
 
@@ -47,7 +55,7 @@ public final class NetProbe {
                         ? "none" : SensitiveDataRedactor.safeUrl(CoreRuntimeState.serverUrl))
                 + " lastError=" + (CoreRuntimeState.lastError == null
                         ? "none" : SensitiveDataRedactor.redactLine(CoreRuntimeState.lastError))
-                + " detail=" + SensitiveDataRedactor.redactLine(detail == null ? "" : detail);
+                + " detail=" + sanitizeDetail(detail);
         Log.i(TAG, line);
 
         File dir = downloadsDir(context);
@@ -56,6 +64,56 @@ public final class NetProbe {
         }
         appendLine(new File(dir, LOG_NAME), line);
         writeJson(new File(dir, JSON_NAME), line);
+    }
+
+    /**
+     * Reports what the platform cookie jar holds for the core origin.
+     *
+     * <p>The session cookie is {@code HttpOnly}, so {@code document.cookie} is always
+     * empty in the page even when authentication is working. Native code can read the
+     * jar, which makes this the decisive check: if the jar has no cookie after the
+     * tokenized URL was loaded, the WebView never completed the token exchange.</p>
+     */
+    public static void recordCookieJar(Context context, String stage, int port) {
+        String origin = "http://127.0.0.1:" + port + "/";
+        String report;
+        try {
+            CookieManager manager = CookieManager.getInstance();
+            String cookie = manager.getCookie(origin);
+            int count = 0;
+            boolean hasSession = false;
+            if (cookie != null && !cookie.isEmpty()) {
+                for (String part : cookie.split(";")) {
+                    String name = part.trim();
+                    if (name.isEmpty()) {
+                        continue;
+                    }
+                    count++;
+                    int eq = name.indexOf('=');
+                    String key = eq >= 0 ? name.substring(0, eq) : name;
+                    if (key.startsWith("dsh_") || key.contains("session") || key.contains("auth")) {
+                        hasSession = true;
+                    }
+                }
+            }
+            report = "origin=" + origin + " cookieCount=" + count + " hasSessionCookie=" + hasSession;
+        } catch (Throwable t) {
+            report = "origin=" + origin + " cookieJarError=" + t.getClass().getSimpleName();
+        }
+        record(context, stage + ":cookiejar", true, -1, -1L, report);
+    }
+
+    /**
+     * Keeps diagnostic key/value pairs intact while removing anything that looks like
+     * a raw secret. URLs are collapsed to scheme://host:port; no key=value pair other
+     * than a URL is rewritten.
+     */
+    private static String sanitizeDetail(String detail) {
+        if (detail == null || detail.isEmpty()) {
+            return "";
+        }
+        String safe = SensitiveDataRedactor.safeUrlInText(detail);
+        return safe.length() > 900 ? safe.substring(0, 900) : safe;
     }
 
     private static File downloadsDir(Context context) {
@@ -73,7 +131,6 @@ public final class NetProbe {
             }
         } catch (Throwable ignored) {
         }
-        // App-specific external dir needs no permission and is still Termux-readable.
         try {
             File dir = context.getExternalFilesDir(null);
             if (dir != null && (dir.isDirectory() || dir.mkdirs())) {
