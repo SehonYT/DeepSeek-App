@@ -29,6 +29,21 @@ process.on("SIGTERM", () => {
     flushCompileCacheOnce();
 });
 
+// Persist the compile cache on every path the JVM-side supervisor uses to stop
+// us. Only SIGTERM was handled before, and the single delayed flush could lose
+// everything when Android kills the process. Node writes the cache directory on
+// flush, so a second boot that starts from a complete cache skips recompiling
+// the ~700 modules it would otherwise parse again.
+for (const signal of ["SIGINT", "SIGHUP"]) {
+    process.on(signal, () => {
+        flushCompileCacheOnce();
+        process.exit(0);
+    });
+}
+process.on("beforeExit", () => {
+    flushCompileCacheOnce();
+});
+
 const targetPort = Number(process.env.DEEPSEEK_PORT || 0);
 const origListen = http.Server.prototype.listen;
 http.Server.prototype.listen = function wrappedListen(...args) {
@@ -59,8 +74,22 @@ http.Server.prototype.listen = function wrappedListen(...args) {
                     http_listen_ms: httpListenMs,
                 })}\n`
             );
-            // Delay compile-cache flush past WebView first paint to avoid flash I/O contention.
-            const timer = setTimeout(flushCompileCacheOnce, 2000);
+            // Flush twice. The first flush lands as soon as the port is bound, so a
+            // process killed shortly after start still leaves a usable cache behind
+            // (Android kills background processes aggressively). The second, delayed
+            // one runs after WebView first paint to capture anything compiled since,
+            // without competing with the first frame for flash I/O.
+            // Defer to a macrotask so the flush never sits on the listen critical
+            // path: the WebSocket handshake and first paint must not wait on flash I/O.
+            setTimeout(() => {
+                try {
+                    flushCompileCacheOnce();
+                } catch {
+                    // Best-effort; never break boot.
+                }
+                cacheFlushed = false;
+            }, 0);
+            const timer = setTimeout(flushCompileCacheOnce, 2500);
             if (typeof timer.unref === "function") {
                 timer.unref();
             }
