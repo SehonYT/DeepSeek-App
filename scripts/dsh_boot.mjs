@@ -23,15 +23,48 @@ const path = _bootRequire("node:path");
 const { fileURLToPath } = _bootRequire("node:url");
 
 const dshRoot = path.resolve(fileURLToPath(import.meta.url), "../../../..");
+const dshRoots = [dshRoot];
 let rpCache = new Map();
 let readCache = new Map();
+let existsCache = new Map();
+let readdirCache = new Map();
 const origRealpathSync = fs.realpathSync;
 const origRealpathNative = origRealpathSync.native;
 const origReadFileSync = fs.readFileSync;
+const origExistsSync = fs.existsSync;
+const origReaddirSync = fs.readdirSync;
 
-// Short-lived startup caches eliminate thousands of redundant lstat/realpath and
-// package.json readFile syscalls during ESM resolution and preflight checks; both
-// hooks are torn down cleanly as soon as the core binds its HTTP port.
+try {
+    const realRoot = origRealpathSync.call(fs, dshRoot);
+    if (realRoot && realRoot !== dshRoot) dshRoots.push(realRoot);
+} catch {
+}
+
+function isUnderDshRoot(p) {
+    for (let i = 0; i < dshRoots.length; i++) {
+        if (p.startsWith(dshRoots[i])) return true;
+    }
+    return false;
+}
+
+function isUtf8Read(opts) {
+    if (opts === "utf8" || opts === "utf-8") return true;
+    return opts !== null && typeof opts === "object" && !opts.flag
+        && (opts.encoding === "utf8" || opts.encoding === "utf-8");
+}
+
+function syncFsExports() {
+    try {
+        if (typeof moduleApi.syncBuiltinESMExports === "function") {
+            moduleApi.syncBuiltinESMExports();
+        }
+    } catch {
+    }
+}
+
+// Short-lived startup caches eliminate thousands of redundant lstat/realpath, existsSync,
+// readdirSync, and manifest readFile syscalls during ESM resolution and Cordis graph init;
+// all hooks are torn down cleanly as soon as the core binds its HTTP port.
 const cachedRealpathSync = function (p, opts) {
     if (rpCache && opts === undefined && typeof p === "string") {
         let hit = rpCache.get(p);
@@ -57,9 +90,39 @@ if (typeof origRealpathNative === "function") {
 }
 fs.realpathSync = cachedRealpathSync;
 
+fs.existsSync = function (p) {
+    if (existsCache && typeof p === "string" && isUnderDshRoot(p)) {
+        let hit = existsCache.get(p);
+        if (hit !== undefined) return hit;
+        hit = origExistsSync.call(this, p);
+        existsCache.set(p, hit);
+        return hit;
+    }
+    return origExistsSync.call(this, p);
+};
+
+fs.readdirSync = function (p, opts) {
+    if (readdirCache && typeof p === "string" && isUnderDshRoot(p)) {
+        let cacheMode = opts === undefined ? 0
+            : (opts !== null && typeof opts === "object" && opts.withFileTypes === true && !opts.recursive ? 1 : -1);
+        if (cacheMode >= 0) {
+            const key = `${cacheMode}:${p}`;
+            let hit = readdirCache.get(key);
+            if (hit !== undefined) return hit.slice();
+            hit = origReaddirSync.call(this, p, opts);
+            if (Array.isArray(hit)) {
+                readdirCache.set(key, hit);
+                return hit.slice();
+            }
+            return hit;
+        }
+    }
+    return origReaddirSync.call(this, p, opts);
+};
+
 fs.readFileSync = function (p, opts) {
-    if (readCache && (opts === "utf8" || opts === "utf-8") && typeof p === "string"
-            && p.startsWith(dshRoot) && p.endsWith("package.json")) {
+    if (readCache && typeof p === "string" && isUtf8Read(opts) && isUnderDshRoot(p)
+            && (p.endsWith("package.json") || p.endsWith(".yml") || p.endsWith(".yaml"))) {
         let hit = readCache.get(p);
         if (hit !== undefined) return hit;
         hit = origReadFileSync.call(this, p, opts);
@@ -69,12 +132,19 @@ fs.readFileSync = function (p, opts) {
     return origReadFileSync.call(this, p, opts);
 };
 
+syncFsExports();
+
 function restoreBootHooks() {
     Error.stackTraceLimit = origStackLimit;
     rpCache = null;
     readCache = null;
+    existsCache = null;
+    readdirCache = null;
     fs.realpathSync = origRealpathSync;
+    fs.existsSync = origExistsSync;
+    fs.readdirSync = origReaddirSync;
     fs.readFileSync = origReadFileSync;
+    syncFsExports();
 }
 
 let tModuleLoaded = tLine1;

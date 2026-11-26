@@ -35,7 +35,7 @@ public final class ShellBridgeInstaller {
     /** Records which prefix the bulk bridges were generated for. Bump when the
      *  bridge script format changes so a warm launch regenerates them once. */
     private static final String BRIDGE_MARKER = ".agy-bridges";
-    public static final int BRIDGE_FORMAT = 5;
+    public static final int BRIDGE_FORMAT = 6;
 
     private ShellBridgeInstaller() {
     }
@@ -247,6 +247,10 @@ public final class ShellBridgeInstaller {
         sb.append("export PREFIX AGY_APPLICATION_ID\n");
         sb.append("unset LD_PRELOAD\n");
         sb.append("export LD_LIBRARY_PATH=\"$PREFIX/lib\"\n");
+        sb.append("if [ -f \"$PREFIX/lib/libtermux-exec.so\" ]; then\n");
+        sb.append("  export LD_PRELOAD=\"$PREFIX/lib/libtermux-exec.so\"\n");
+        sb.append("fi\n");
+        sb.append("export TMPDIR=\"${TMPDIR:-$PREFIX/tmp}\"\n");
         sb.append("export PATH=\"$PREFIX/bin:/system/bin\"\n");
         sb.append("export TERM=\"xterm-256color\"\n");
         sb.append("export PS1='\\[\\e[0;32m\\]\\w\\[\\e[0m\\] \\$ '\n");

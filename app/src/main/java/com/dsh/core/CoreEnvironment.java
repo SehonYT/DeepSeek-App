@@ -131,6 +131,24 @@ public final class CoreEnvironment {
         env.put("DEEPSEEK_HOST", "127.0.0.1");
         env.put("DEEPSEEK_PORT", String.valueOf(rm.getHttpsPort()));
         env.put("DSH_TELEMETRY_DISABLED", "1");
+        if (!env.containsKey("DSH_PERMISSION_MODE")) {
+            // Android's app UID already enforces OS isolation; default to full
+            // harness access so bash installs in $PREFIX/$HOME are not blocked.
+            env.put("DSH_PERMISSION_MODE", "danger-full-access");
+        }
+        File cacheDir = rm.appContext().getCacheDir();
+        if (!env.containsKey("XDG_CACHE_HOME")) {
+            env.put("XDG_CACHE_HOME", cacheDir.getAbsolutePath());
+        }
+        if (!env.containsKey("NPM_CONFIG_PREFIX")) {
+            env.put("NPM_CONFIG_PREFIX", prefix.getAbsolutePath());
+        }
+        if (!env.containsKey("NPM_CONFIG_CACHE")) {
+            env.put("NPM_CONFIG_CACHE", new File(cacheDir, "npm").getAbsolutePath());
+        }
+        if (!env.containsKey("PIP_CACHE_DIR")) {
+            env.put("PIP_CACHE_DIR", new File(cacheDir, "pip").getAbsolutePath());
+        }
 
         // NODE_PATH: Ensure Node resolves modules from both root dsh and apps/cli
         File dshDir = new File(rm.getRuntimeDir(), "dsh");

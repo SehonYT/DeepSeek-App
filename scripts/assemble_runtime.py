@@ -148,10 +148,11 @@ def apply_mobile_runtime_quick_wins(work_dir: str):
             open(cordis_js, "w", encoding="utf-8").write(src.replace(old_get, new_get, 1))
             print("[OK] Patched Cordis ReflectService.handler.get for lazy Error allocation.")
 
-    # 2. Replace recursive [...this.entries()] in EntryTree.getTasks() with iterative collection.
+    # 2. Replace recursive [...this.entries()] in EntryTree.getTasks() and EntryTree.*entries() with iterative walks.
     loader_js = os.path.join(work_dir, "vendor", "loader", "lib", "index.js")
     if os.path.isfile(loader_js):
         src = open(loader_js, "r", encoding="utf-8").read()
+        updated = src
         old_tasks = (
             '\tgetTasks() {\n'
             '\t\treturn [...this.entries()].map((entry) => entry._initTask || entry.fiber?.inertia).filter(isNonNullable);\n'
@@ -173,9 +174,31 @@ def apply_mobile_runtime_quick_wins(work_dir: str):
             '\t\treturn tasks;\n'
             '\t}'
         )
-        if old_tasks in src:
-            open(loader_js, "w", encoding="utf-8").write(src.replace(old_tasks, new_tasks, 1))
+        if old_tasks in updated:
+            updated = updated.replace(old_tasks, new_tasks, 1)
             print("[OK] Patched Loader EntryTree.getTasks() to avoid recursive generator spreads.")
+        entries_re = re.compile(
+            r"\t\*entries\(\)\s*\{\s*for\s*\(\s*(?:const|let)\s+entry\s+of\s+Object\.values\(this\.store\)\s*\)\s*\{\s*yield\s+entry;\s*if\s*\(entry\.subtree\)\s*yield\*\s*entry\.subtree\.entries\(\);\s*\}\s*\}"
+        )
+        new_entries = (
+            '\t*entries() {\n'
+            '\t\tconst stack = [this];\n'
+            '\t\twhile (stack.length) {\n'
+            '\t\t\tconst store = stack.pop().store;\n'
+            '\t\t\tfor (const key in store) {\n'
+            '\t\t\t\tconst entry = store[key];\n'
+            '\t\t\t\tyield entry;\n'
+            '\t\t\t\tif (entry.subtree) stack.push(entry.subtree);\n'
+            '\t\t\t}\n'
+            '\t\t}\n'
+            '\t}'
+        )
+        updated2, n_ent = entries_re.subn(new_entries, updated, count=1)
+        if n_ent:
+            updated = updated2
+            print("[OK] Patched Loader EntryTree.*entries() to use iterative stack traversal.")
+        if updated != src:
+            open(loader_js, "w", encoding="utf-8").write(updated)
 
     # 3. Guard socket.ping() inside RemoteStreamMuxServer.startHeartbeat() against dead sockets.
     gw_js = os.path.join(work_dir, "packages", "api", "gateway", "lib", "index.js")
@@ -203,6 +226,55 @@ def apply_mobile_runtime_quick_wins(work_dir: str):
         if changed:
             open(base_patch, "w", encoding="utf-8").write(src)
             print("[OK] Disabled otel / session-telemetry-otel in mobile cordis.patch.yml.")
+
+    # 5. Android sandbox compatibility: Android app-UID isolation replaces bwrap/landlock,
+    #    and $PREFIX/$HOME/$TMPDIR must stay writable for package installs even in workspace-write.
+    for rel_roots in (
+        os.path.join("packages", "sandbox", "sandbox", "lib", "roots.js"),
+        os.path.join("packages", "sandbox", "sandbox", "lib", "types", "roots.js"),
+    ):
+        fp = os.path.join(work_dir, rel_roots)
+        if not os.path.isfile(fp):
+            continue
+        src = open(fp, "r", encoding="utf-8").read()
+        if "process.platform === 'android'" in src:
+            continue
+        old_wr = "return [...new Set([...workspaceWritableRoots(policy), canonicalPath('/tmp'), canonicalPath(tmpdir())])];"
+        new_wr = (
+            "const extra = process.platform === 'android'\n"
+            "        ? [process.env.PREFIX, process.env.HOME, process.env.TMPDIR].filter(Boolean).map(canonicalPath)\n"
+            "        : [];\n"
+            "    return [...new Set([...workspaceWritableRoots(policy), canonicalPath('/tmp'), canonicalPath(tmpdir()), ...extra])];"
+        )
+        if old_wr in src:
+            open(fp, "w", encoding="utf-8").write(src.replace(old_wr, new_wr, 1))
+            print(f"[OK] Added Android writableRoots ($PREFIX/$HOME/$TMPDIR) in {rel_roots}.")
+
+    for rel_sbx in (
+        os.path.join("packages", "sandbox", "sandbox-local", "lib", "index.js"),
+        os.path.join("packages", "sandbox", "sandbox-local", "lib", "types", "index.js"),
+    ):
+        fp = os.path.join(work_dir, rel_sbx)
+        if not os.path.isfile(fp):
+            continue
+        src = open(fp, "r", encoding="utf-8").read()
+        if "process.platform === 'android'" in src:
+            continue
+        old_sel = "const selected = this.selectRunner(policy.mode);"
+        new_sel = (
+            "if (process.platform === 'android' && policy.mode !== 'read-only') {\n"
+            "            return Promise.resolve({\n"
+            "                argv,\n"
+            "                enforcement: 'partial',\n"
+            "                denialSignatures: ['permission denied'],\n"
+            "                runnerFailureRules: [],\n"
+            "            });\n"
+            "        }\n"
+            "        const selected = this.selectRunner(policy.mode);"
+        )
+        if old_sel in src:
+            open(fp, "w", encoding="utf-8").write(src.replace(old_sel, new_sel, 1))
+            print(f"[OK] Enabled Android app-UID sandbox passthrough for non-read-only modes in {rel_sbx}.")
 
 
 def prune_non_runtime_trees(work_dir: str):

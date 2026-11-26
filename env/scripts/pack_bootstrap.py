@@ -231,9 +231,24 @@ def prepatch_tree_for_package(dest: str, pkg_name: str) -> None:
                     os.chmod(fp, st.st_mode)
                     text_patched += 1
 
+    symlink_patched = 0
+    for root, dirs, files in os.walk(dest):
+        for name in (*dirs, *files):
+            fp = os.path.join(root, name)
+            if not os.path.islink(fp):
+                continue
+            target = os.readlink(fp)
+            if not TERMUX_PREFIX_RE.match(target):
+                continue
+            new_target = TERMUX_PREFIX_RE.sub(target_prefix, target, count=1)
+            if new_target != target:
+                os.unlink(fp)
+                os.symlink(new_target, fp)
+                symlink_patched += 1
+
     with open(os.path.join(dest, ".dsh-prepatched"), "w", encoding="utf-8") as f:
         f.write(pkg_name + "\n")
-    print(f"[pack_bootstrap] Pre-patched for {pkg_name}: {elf_patched} ELFs, {text_patched} scripts")
+    print(f"[pack_bootstrap] Pre-patched for {pkg_name}: {elf_patched} ELFs, {text_patched} scripts, {symlink_patched} symlinks")
 
 
 def pack_bootstrap(zip_path, out_tar_gz, trim=True, extra_debs=None, prepatch_pkg=None):
