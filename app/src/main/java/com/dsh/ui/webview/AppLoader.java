@@ -54,19 +54,23 @@ public final class AppLoader {
         final String url = appUrl;
         SessionCookiePrimer.prime(context, appUrl, cookieInstalled -> {
             Log.i(TAG, "loading UI (sessionCookiePrimed=" + cookieInstalled + ")");
+            // Mint the version-2 operator credential only after the document load has
+            // performed its own index exchange: the two credentials share one cookie
+            // name, so minting first would be overwritten by the document's own
+            // Set-Cookie. The event stream and the /api/remote.mux upgrade need the
+            // version-2 peer; without it the client's connection generation never
+            // becomes ready and the sidebar stays on "Reconnecting" even though the
+            // page itself renders fine. onPageFinished is the only point that is
+            // guaranteed to be after that exchange, so the mint is queued there.
+            AgyWebViewClient.runAfterNextCoreLoad(
+                    () -> SessionCookiePrimer.mintApiCredentialAfterLoad(context, url));
             try {
                 target.loadUrl(url);
             } catch (Throwable t) {
                 Log.w(TAG, "loadUrl failed: " + t.getMessage());
-                return;
+                // The queued mint must not fire against some later, unrelated page.
+                AgyWebViewClient.runAfterNextCoreLoad(null);
             }
-            // Mint the version-2 operator credential only after the document load has
-            // performed its own index exchange: the two credentials share one cookie
-            // name, so minting first would be overwritten. The event stream and the
-            // /api/remote.mux upgrade need the version-2 peer; without it the client's
-            // connection generation never becomes ready and the sidebar stays on
-            // "Reconnecting" even though the page itself renders fine.
-            SessionCookiePrimer.mintApiCredentialAfterLoad(context, url);
         });
         return true;
     }

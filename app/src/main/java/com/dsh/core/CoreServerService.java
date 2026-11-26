@@ -35,6 +35,16 @@ public final class CoreServerService extends Service {
     public void onCreate() {
         super.onCreate();
         BootMetrics.markServiceStart();
+        // Promote to foreground FIRST. startForegroundService() gives the service
+        // only ~5s (10s on some ROMs) to call startForeground() before the
+        // platform kills the app; everything below touches disk and binder, so
+        // doing it first used to spend that budget before the notification
+        // existed. The wake lock is taken here too, before the long-lived
+        // threads are created.
+        ForegroundNotification.start(this);
+        wakeLock = new WakeLockHolder();
+        wakeLock.acquire(this);
+
         runtime = new RuntimeManager(this);
         logBuffer = new com.dsh.log.LogRingBuffer();
         com.dsh.log.LogRingBuffer.installShared(logBuffer);
@@ -51,10 +61,6 @@ public final class CoreServerService extends Service {
         CoreRuntimeState.lastError = null;
         CoreRuntimeState.serverUrl = null;
         CoreRuntimeState.detectedWebUrl = null;
-
-        ForegroundNotification.start(this);
-        wakeLock = new WakeLockHolder();
-        wakeLock.acquire(this);
 
         openUrlWatcher = new OpenUrlWatcher(this);
         openUrlWatcher.start();
@@ -209,7 +215,6 @@ public final class CoreServerService extends Service {
 
     @Override
     public void onDestroy() {
-        stopBackgroundDaemon();
         if (gatewayServer != null) {
             gatewayServer.stop();
         }
@@ -232,6 +237,14 @@ public final class CoreServerService extends Service {
         CoreRuntimeState.detectedWebUrl = null;
         CoreRuntimeState.lastError = null;
         CoreRuntimeState.restarting = false;
+        // stopBackgroundDaemon() forks python3, waits up to 1.5s for it and
+        // destroys it. That used to run right at the top of onDestroy(), i.e. on
+        // the MAIN thread, so the looper (and any UI animation) was blocked while
+        // the service was torn down. Fork it off the main thread instead, after
+        // the synchronous teardown above.
+        Thread stopper = new Thread(this::stopBackgroundDaemon, "DshDaemonStopper");
+        stopper.setDaemon(true);
+        stopper.start();
         super.onDestroy();
     }
 

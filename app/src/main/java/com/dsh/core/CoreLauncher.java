@@ -11,6 +11,7 @@ import com.dsh.install.EnvInstaller;
 import com.dsh.runtime.CoreInstaller;
 import com.dsh.runtime.RuntimeManager;
 import com.dsh.runtime.ShellBridgeInstaller;
+import com.dsh.util.ErrorText;
 import com.dsh.util.ProcessUtils;
 
 import java.io.File;
@@ -112,12 +113,25 @@ public final class CoreLauncher {
             final Context ctxForEnv = context;
             final RuntimeManager rmForCore = runtime;
             final Throwable[] envFailure = new Throwable[1];
+            // The runtime extract is REQUIRED (node cannot start without
+            // dsh/apps/cli/lib/bin.js). Before, an exception inside installCore()
+            // was uncaught on this helper thread: it died silently, join()
+            // returned normally, and launch() went on to fork node against a
+            // half-populated runtime, so the real cause only surfaced minutes
+            // later as "core did not start". Capture it and fail closed here.
+            final Throwable[] coreFailure = new Throwable[1];
 
             Thread coreThread = new Thread(new Runnable() {
                 @Override
                 public void run() {
                     long t = SystemClock.elapsedRealtime();
-                    rmForCore.installCore();
+                    try {
+                        rmForCore.installCore();
+                    } catch (Throwable e) {
+                        coreFailure[0] = e;
+                        Log.e(TAG, "runtime install failed: " + e.getMessage(), e);
+                        return;
+                    }
                     BootMetrics.setCoreCheckMs(SystemClock.elapsedRealtime() - t);
                 }
             }, "CoreInstallThread");
@@ -146,6 +160,15 @@ public final class CoreLauncher {
                 Thread.currentThread().interrupt();
                 throw new IOException("interrupted waiting for runtime extract", ie);
             }
+            if (coreFailure[0] != null) {
+                // Fail closed with the real reason instead of forking node
+                // against an incomplete runtime tree.
+                String reason = coreFailure[0].getMessage();
+                if (reason == null || reason.isEmpty()) {
+                    reason = coreFailure[0].getClass().getSimpleName();
+                }
+                throw new IOException("runtime install failed: " + reason, coreFailure[0]);
+            }
 
             // Persist composite stamp so subsequent launches hit the <1ms warm-boot path
             String installedEnvId = EnvInstaller.readInstalledBundleId(context);
@@ -153,6 +176,23 @@ public final class CoreLauncher {
                     !envBundleId.isEmpty() ? envBundleId : installedEnvId,
                     coreHash,
                     ShellBridgeInstaller.BRIDGE_FORMAT);
+        }
+
+        // 3b. Refresh resolv.conf and (re)register the default-network callback on
+        // EVERY boot. Both used to happen only inside CoreInstaller.installCore(),
+        // i.e. only on the cold path, so every warm boot forked node with whatever
+        // DNS servers the *previous* session happened to see. After a
+        // Wi-Fi <-> mobile switch between launches the core's Go resolver
+        // (GODEBUG=netdns=go) read a resolv.conf full of unreachable servers and
+        // every request failed until the next cold install -- the UI then shows a
+        // disconnected sidebar. CoreInstaller still calls them on the cold path;
+        // both are idempotent and now cheap (unchanged files are not rewritten).
+        try {
+            runtime.writeNetworkConfig();
+            runtime.startNetworkMonitor();
+        } catch (Throwable t) {
+            // Network plumbing must never block the fork.
+            Log.w(TAG, "cannot refresh network config before fork: " + t.getMessage());
         }
 
         // 4. Launch DeepSeek process immediately; CoreProcessSupervisor handles post-ready tasks.

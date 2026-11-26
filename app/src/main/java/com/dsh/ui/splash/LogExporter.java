@@ -23,12 +23,31 @@ import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /** Collects diagnostics and core logs for user export and debugging. */
 public final class LogExporter {
 
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final int MAX_LOG_BYTES = 300_000;
+
+    /**
+     * All three export actions used to run on the main thread, called from the
+     * splash bridge: reading and line-by-line redacting up to 300 KiB of core log,
+     * writing it out, and recursively zipping the whole projects directory. On the
+     * target device an agent project tree is tens of thousands of files, so tapping
+     * "Backup Projects" on the splash froze the UI for the entire archive write.
+     * The heavy work now runs here and only the user-visible step returns to main.
+     */
+    private static final ExecutorService IO = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "LogExporter");
+        t.setDaemon(true);
+        return t;
+    });
+
+    private static final android.os.Handler MAIN =
+            new android.os.Handler(android.os.Looper.getMainLooper());
 
     private LogExporter() {
     }
@@ -123,62 +142,91 @@ public final class LogExporter {
         return sb.toString();
     }
 
-    public static void copyToClipboard(Context context) {
+    public static void copyToClipboard(final Context context) {
         if (context == null) {
             return;
         }
-        try {
-            String report = collectDiagnostics(context);
-            ClipboardManager cm = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
-            if (cm != null) {
-                ClipData clip = ClipData.newPlainText("DeepSeek Logs", report);
-                cm.setPrimaryClip(clip);
-                Toast.makeText(context, "Logs copied to clipboard", Toast.LENGTH_SHORT).show();
+        final Context app = context.getApplicationContext() != null
+                ? context.getApplicationContext() : context;
+        IO.execute(() -> {
+            String report;
+            try {
+                report = collectDiagnostics(app);
+            } catch (Throwable t) {
+                report = null;
             }
-        } catch (Exception e) {
-            Toast.makeText(context, "Failed to copy logs: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-        }
+            final String finalReport = report;
+            MAIN.post(() -> {
+                if (finalReport == null) {
+                    Toast.makeText(app, "Failed to copy logs", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                try {
+                    ClipboardManager cm = (ClipboardManager) app.getSystemService(Context.CLIPBOARD_SERVICE);
+                    if (cm != null) {
+                        cm.setPrimaryClip(ClipData.newPlainText("DeepSeek Logs", finalReport));
+                        Toast.makeText(app, "Logs copied to clipboard", Toast.LENGTH_SHORT).show();
+                    }
+                } catch (Exception e) {
+                    Toast.makeText(app, "Failed to copy logs: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                }
+            });
+        });
     }
 
-    public static void saveAndShare(Context context) {
+    public static void saveAndShare(final Context context) {
         if (context == null) {
             return;
         }
+        final Context app = context.getApplicationContext() != null
+                ? context.getApplicationContext() : context;
+        IO.execute(() -> {
+            final String report;
+            final File savedFile;
+            try {
+                report = collectDiagnostics(app);
+                savedFile = writeReport(app, report);
+            } catch (Throwable t) {
+                MAIN.post(() -> Toast.makeText(app, "Failed to export logs",
+                        Toast.LENGTH_SHORT).show());
+                return;
+            }
+            MAIN.post(() -> shareReport(app, report, savedFile));
+        });
+    }
+
+    /** Writes the report to the first writable shared location; null when none worked. */
+    private static File writeReport(Context context, String report) {
+        File downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+        if (downloadsDir != null && (downloadsDir.exists() || downloadsDir.mkdirs())) {
+            File target = new File(downloadsDir, "deepseek-core.log");
+            try (OutputStreamWriter writer = new OutputStreamWriter(new FileOutputStream(target), UTF8)) {
+                writer.write(report);
+                return target;
+            } catch (Exception ignored) {
+            }
+        }
+        File direct = new File(Environment.getExternalStorageDirectory(), "Download/deepseek-core.log");
+        try (OutputStreamWriter writer = new OutputStreamWriter(new FileOutputStream(direct), UTF8)) {
+            writer.write(report);
+            return direct;
+        } catch (Exception ignored) {
+        }
+        File appExternal = context.getExternalFilesDir(null);
+        if (appExternal != null && (appExternal.exists() || appExternal.mkdirs())) {
+            File target = new File(appExternal, "deepseek-core.log");
+            try (OutputStreamWriter writer = new OutputStreamWriter(new FileOutputStream(target), UTF8)) {
+                writer.write(report);
+                return target;
+            } catch (Exception ignored) {
+            }
+        }
+        return null;
+    }
+
+    /** User-visible part of {@link #saveAndShare}: toast then the system share sheet. */
+    private static void shareReport(Context context, String report, File savedFile) {
         try {
-            String report = collectDiagnostics(context);
-            File savedFile = null;
-
-            File downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
-            if (downloadsDir != null && (downloadsDir.exists() || downloadsDir.mkdirs())) {
-                File target = new File(downloadsDir, "deepseek-core.log");
-                try (OutputStreamWriter writer = new OutputStreamWriter(new FileOutputStream(target), UTF8)) {
-                    writer.write(report);
-                    savedFile = target;
-                } catch (Exception ignored) {
-                }
-            }
-
-            if (savedFile == null) {
-                File direct = new File(Environment.getExternalStorageDirectory(), "Download/deepseek-core.log");
-                try (OutputStreamWriter writer = new OutputStreamWriter(new FileOutputStream(direct), UTF8)) {
-                    writer.write(report);
-                    savedFile = direct;
-                } catch (Exception ignored) {
-                }
-            }
-
-            if (savedFile == null) {
-                File appExternal = context.getExternalFilesDir(null);
-                if (appExternal != null && (appExternal.exists() || appExternal.mkdirs())) {
-                    File target = new File(appExternal, "deepseek-core.log");
-                    try (OutputStreamWriter writer = new OutputStreamWriter(new FileOutputStream(target), UTF8)) {
-                        writer.write(report);
-                        savedFile = target;
-                    } catch (Exception ignored) {
-                    }
-                }
-            }
-
             if (savedFile != null) {
                 Toast.makeText(context, "Logs saved to " + savedFile.getAbsolutePath(), Toast.LENGTH_LONG).show();
             } else {
@@ -201,43 +249,58 @@ public final class LogExporter {
     }
 
     /** Exports and archives the user's projects directory to external storage so data is never lost. */
-    public static void exportProjects(Context context) {
+    public static void exportProjects(final Context context) {
         if (context == null) {
             return;
         }
-        File projectsDir = new File(context.getFilesDir(), "projects");
-        if (!projectsDir.exists() || !projectsDir.isDirectory()) {
-            Toast.makeText(context, "No projects directory found to backup", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        File[] children = projectsDir.listFiles();
-        if (children == null || children.length == 0) {
-            Toast.makeText(context, "Projects directory is empty", Toast.LENGTH_SHORT).show();
-            return;
-        }
-
-        try {
-            File savedZip = null;
-            String zipName = "deepseek-projects-backup-"
-                    + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date()) + ".zip";
-
-            File downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
-            if (downloadsDir != null && (downloadsDir.exists() || downloadsDir.mkdirs())) {
-                File target = new File(downloadsDir, zipName);
-                if (writeZip(projectsDir, target)) {
-                    savedZip = target;
-                }
+        final Context app = context.getApplicationContext() != null
+                ? context.getApplicationContext() : context;
+        // The directory walk and the zip write are the two heaviest operations the
+        // splash can trigger; they must never run on the main thread.
+        IO.execute(() -> {
+            final File projectsDir = new File(app.getFilesDir(), "projects");
+            if (!projectsDir.exists() || !projectsDir.isDirectory()) {
+                MAIN.post(() -> Toast.makeText(app, "No projects directory found to backup",
+                        Toast.LENGTH_SHORT).show());
+                return;
             }
-
-            if (savedZip == null) {
-                File appExternal = context.getExternalFilesDir(null);
-                if (appExternal != null && (appExternal.exists() || appExternal.mkdirs())) {
-                    File target = new File(appExternal, zipName);
+            final File[] children = projectsDir.listFiles();
+            if (children == null || children.length == 0) {
+                MAIN.post(() -> Toast.makeText(app, "Projects directory is empty",
+                        Toast.LENGTH_SHORT).show());
+                return;
+            }
+            File zipped = null;
+            try {
+                String zipName = "deepseek-projects-backup-"
+                        + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date()) + ".zip";
+                File downloadsDir = Environment.getExternalStoragePublicDirectory(
+                        Environment.DIRECTORY_DOWNLOADS);
+                if (downloadsDir != null && (downloadsDir.exists() || downloadsDir.mkdirs())) {
+                    File target = new File(downloadsDir, zipName);
                     if (writeZip(projectsDir, target)) {
-                        savedZip = target;
+                        zipped = target;
                     }
                 }
+                if (zipped == null) {
+                    File appExternal = app.getExternalFilesDir(null);
+                    if (appExternal != null && (appExternal.exists() || appExternal.mkdirs())) {
+                        File target = new File(appExternal, zipName);
+                        if (writeZip(projectsDir, target)) {
+                            zipped = target;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
             }
+            final File savedZip = zipped;
+            MAIN.post(() -> shareProjectBackup(app, savedZip));
+        });
+    }
+
+    /** User-visible part of {@link #exportProjects}: toast then the share sheet. */
+    private static void shareProjectBackup(Context context, File savedZip) {
+        try {
 
             if (savedZip != null) {
                 Toast.makeText(context, "Projects backed up to " + savedZip.getAbsolutePath(), Toast.LENGTH_LONG).show();

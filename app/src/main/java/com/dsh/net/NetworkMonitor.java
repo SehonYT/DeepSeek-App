@@ -35,6 +35,8 @@ public final class NetworkMonitor {
     private boolean offline;
     private boolean ignoreInitialAvailable;
     private Network currentNetwork;
+    /** Link-properties fingerprint; suppresses duplicate DNS rewrites. */
+    private String lastDnsSignature = "";
 
     public NetworkMonitor(Context context, Listener listener) {
         this(context, listener, null);
@@ -94,20 +96,65 @@ public final class NetworkMonitor {
 
                 @Override
                 public void onLost(Network network) {
+                    // Only report offline when no usable default network is left.
+                    // The old test also fired when currentNetwork was still null
+                    // (the callback can beat the initial getActiveNetwork()
+                    // snapshot) and it marked the device offline even if the OS
+                    // had another default network ready. A spurious offline is
+                    // not cosmetic: recovery is the only thing that dispatches
+                    // window 'online', so the WebView stayed on "Reconnecting".
                     synchronized (stateLock) {
-                        if (currentNetwork == null || currentNetwork.equals(network)
-                                || cm.getActiveNetwork() == null) {
-                            offline = true;
-                            ignoreInitialAvailable = false;
-                            currentNetwork = null;
+                        Network active = null;
+                        try {
+                            active = cm.getActiveNetwork();
+                        } catch (Exception ignored) {
                         }
+                        if (currentNetwork == null || currentNetwork.equals(network)) {
+                            currentNetwork = active;
+                        }
+                        offline = (active == null);
+                        ignoreInitialAvailable = false;
                     }
+                    // A loss that still leaves a default network only changes the
+                    // DNS set; refresh it. Never publish a bare "offline" event:
+                    // MainActivity only reacts to recovery, and the old code
+                    // marked the device offline even when the OS had already
+                    // handed over to another default network (Wi-Fi -> mobile),
+                    // which left the WebView stuck on "Reconnecting".
                     notifyChanged();
                 }
 
                 @Override
                 public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties) {
+                    // Fires often (DHCP renew, IPv6 RA, MTU change). Only rewrite
+                    // the DNS config when the server list actually changed, so a
+                    // chatty callback cannot turn into repeated fsyncs.
+                    String signature = dnsSignature(linkProperties);
+                    synchronized (stateLock) {
+                        if (signature.equals(lastDnsSignature)) {
+                            return;
+                        }
+                        lastDnsSignature = signature;
+                    }
                     notifyChanged();
+                }
+
+                @Override
+                public void onCapabilitiesChanged(Network network,
+                                                  android.net.NetworkCapabilities capabilities) {
+                    // Association/handover shows up here first; a network that is
+                    // validated is by definition not offline. Clearing the flag
+                    // here prevents a lost-then-replaced callback pair from
+                    // leaving the UI stuck in the offline state.
+                    synchronized (stateLock) {
+                        if (capabilities != null
+                                && capabilities.hasCapability(
+                                        android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                            ignoreInitialAvailable = false;
+                            currentNetwork = network;
+                            offline = false;
+                        }
+                    }
                 }
             };
             cm.registerDefaultNetworkCallback(cb);
@@ -127,6 +174,12 @@ public final class NetworkMonitor {
         if (!registered || connectivityManager == null || callback == null) {
             registered = false;
             callback = null;
+            synchronized (stateLock) {
+                currentNetwork = null;
+                offline = false;
+                ignoreInitialAvailable = false;
+                lastDnsSignature = "";
+            }
             return;
         }
         try {
@@ -154,6 +207,19 @@ public final class NetworkMonitor {
         } catch (Exception e) {
             Log.w(TAG, "network change listener failed", e);
         }
+    }
+
+    private static String dnsSignature(LinkProperties link) {
+        if (link == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (java.net.InetAddress addr : link.getDnsServers()) {
+            if (addr != null) {
+                sb.append(addr.getHostAddress()).append(',');
+            }
+        }
+        return sb.toString();
     }
 
     private void notifyRecovered() {

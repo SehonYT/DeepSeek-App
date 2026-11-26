@@ -22,6 +22,9 @@ public final class NetworkConfigWriter {
     private NetworkConfigWriter() {
     }
 
+    /** Last content written per path, so an unchanged refresh skips all flash I/O. */
+    private static final java.util.Map<String, String> lastWritten = new java.util.HashMap<>();
+
     public static void write(Context appContext) {
         List<String> dnsList = DnsCollector.collectDnsServers(appContext);
         // Ensure robust public fallbacks (Google 8.8.8.8, Cloudflare 1.1.1.1, Google 8.8.4.4)
@@ -55,11 +58,50 @@ public final class NetworkConfigWriter {
                 if (!etc.exists() && !etc.mkdirs()) {
                     continue;
                 }
-                AtomicFileWriter.writeText(new File(etc, "resolv.conf"), resolvContent);
-                AtomicFileWriter.writeText(new File(etc, "hosts"), hostsContent);
+                writeIfChanged(new File(etc, "resolv.conf"), resolvContent);
+                writeIfChanged(new File(etc, "hosts"), hostsContent);
             } catch (Exception e) {
                 Log.w(TAG, "failed writing network config to " + etc, e);
             }
+        }
+    }
+
+    /**
+     * Atomic write that is skipped when the file already holds exactly this
+     * content. Every network change used to rewrite 6 files (3 dirs x 2 files),
+     * each with an fsync, and NetworkMonitor calls this on EVERY callback
+     * (including onLinkPropertiesChanged), so an idle device could fsync 12+
+     * times for a callback that changed nothing.
+     */
+    private static void writeIfChanged(File file, String content) {
+        String key = file.getAbsolutePath();
+        byte[] bytes = content.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        // The cache is only a hint: re-validate that the file still exists, so a
+        // wipe (cold install clears runtime/) cannot leave a stale cache entry
+        // suppressing the rewrite.
+        synchronized (lastWritten) {
+            if (content.equals(lastWritten.get(key)) && file.isFile() && file.length() == bytes.length) {
+                return;
+            }
+        }
+        try {
+            if (file.isFile() && file.length() == bytes.length) {
+                String existing;
+                try (java.io.InputStream in = new java.io.FileInputStream(file)) {
+                    existing = com.dsh.util.IoUtil.readAll(in, "UTF-8");
+                }
+                if (content.equals(existing)) {
+                    synchronized (lastWritten) {
+                        lastWritten.put(key, content);
+                    }
+                    return;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        AtomicFileWriter.writeText(file, content);
+        synchronized (lastWritten) {
+            lastWritten.put(key, content);
         }
     }
 }

@@ -17,10 +17,25 @@ import com.dsh.oauth.OAuthManager;
 import com.dsh.util.SensitiveDataRedactor;
 import com.dsh.util.TrustedCoreOrigin;
 
+import java.util.concurrent.atomic.AtomicReference;
+
 /** WebView client: OAuth interception, loopback TLS, and static asset serving. */
 public final class AgyWebViewClient extends WebViewClient {
 
     private static final String TAG = "WebViewHost";
+
+    /**
+     * Action to run once the next core document has finished loading. Used to
+     * order the version-2 credential mint AFTER the WebView's own index exchange.
+     * Static on purpose: the WebView host is discarded and rebuilt on renderer
+     * death, but the ordering requirement is per document load.
+     */
+    private static final AtomicReference<Runnable> AFTER_NEXT_CORE_LOAD = new AtomicReference<>();
+
+    /** Runs {@code action} once, after the next trusted core document finishes loading. */
+    public static void runAfterNextCoreLoad(Runnable action) {
+        AFTER_NEXT_CORE_LOAD.set(action);
+    }
 
     private final Context context;
     private final OAuthManager oauth;
@@ -220,6 +235,16 @@ public final class AgyWebViewClient extends WebViewClient {
                 if (TrustedCoreOrigin.matches(uri, bridge.getEnginePort())) {
                     injectTrustedHelpers(v);
                     probePageConnectivity(v);
+                    // The core document has performed its own GET /?token= exchange
+                    // by now, so the jar holds the version-1 index cookie. Only now
+                    // may the version-2 operator credential be minted: both use the
+                    // same cookie name, and minting earlier let the document's later
+                    // Set-Cookie overwrite the operator credential, which left the
+                    // Gateway stream unauthenticated ("Reconnecting").
+                    Runnable afterLoad = AFTER_NEXT_CORE_LOAD.getAndSet(null);
+                    if (afterLoad != null) {
+                        afterLoad.run();
+                    }
                 }
             } catch (Exception ignored) {
             }

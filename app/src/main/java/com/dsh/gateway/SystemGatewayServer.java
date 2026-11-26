@@ -5,6 +5,7 @@ import android.system.Os;
 import android.util.Log;
 
 import com.dsh.log.CrashRecorder;
+import com.dsh.util.ProcessUtils;
 import com.dsh.log.LogRingBuffer;
 
 import org.json.JSONObject;
@@ -62,11 +63,19 @@ public final class SystemGatewayServer {
     public synchronized void start() {
         if (running) return;
         running = true;
-        authToken = generateToken();
-        writeTokenFile(authToken);
 
         acceptThread = new Thread(() -> {
             try {
+                // Mint and persist the token on THIS thread, not on the caller's.
+                // start() runs from Service.onCreate(), i.e. the main thread, and
+                // writeTokenFile() does createNewFile + chmod + write + fsync --
+                // real flash I/O plus a durability barrier on the looper. The core
+                // is forked seconds later, so there is no client to race with.
+                authToken = generateToken();
+                if (!running) {
+                    return;
+                }
+                writeTokenFile(authToken);
                 try {
                     serverSocket = new ServerSocket();
                     serverSocket.setReuseAddress(true);
@@ -90,12 +99,25 @@ public final class SystemGatewayServer {
                         Socket client = serverSocket.accept();
                         client.setSoTimeout(3000);
                         executor.submit(() -> handleClient(client));
+                    } catch (java.util.concurrent.RejectedExecutionException ree) {
+                        // shutdownNow() raced an accepted connection: the pool is
+                        // gone, so the server is effectively dead. Stop looping.
+                        if (!running) break;
+                        throw ree;
                     } catch (Exception e) {
                         if (!running) break;
+                        // A transient accept error must not become a hot spin
+                        // loop that pegs a core and drains battery.
+                        ProcessUtils.sleep(50);
                     }
                 }
             } catch (Exception e) {
                 Log.w(TAG, "Gateway server bind failed on port " + port + ": " + e.getMessage());
+                // The gateway is optional, but a permanently dead accept loop used
+                // to leave running=true forever: start() then returned immediately
+                // for the rest of the process lifetime, so the shell/agent side of
+                // the app had no gateway and no way to ask for a restart.
+                running = false;
             }
         }, "DshGatewayServer");
         acceptThread.setDaemon(true);

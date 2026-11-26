@@ -135,6 +135,19 @@ public class MainActivity extends Activity
     };
 
     /**
+     * Backstop reveal after onPageFinished. Kept as one instance so a new page load
+     * replaces the pending one instead of stacking another copy on the WebView's
+     * handler (which is not this activity's handler, so Activity.onDestroy's
+     * removeCallbacksAndMessages() cannot clear it).
+     */
+    private final Runnable paintFallback = new Runnable() {
+        @Override
+        public void run() {
+            dismissSplash();
+        }
+    };
+
+    /**
      * Runs for the whole activity life: it drives the splash, loads the app on
      * ready, and keeps watching for a post-ready core death.
      */
@@ -172,6 +185,13 @@ public class MainActivity extends Activity
                 // setting appLoaded first would have hidden the splash and left a
                 // blank screen with no way back.
                 if (!webViewHost.loadApp()) {
+                    // The deadline branch further down only runs while serverUrl is
+                    // null, so a URL that the loader keeps refusing would otherwise
+                    // leave the splash spinning for the rest of the process lifetime.
+                    if (!splash.isFatalShown() && bootElapsedMs() > splashDeadlineBudgetMs()) {
+                        showFatalError("the published core URL could not be authenticated"
+                                + " (it carries no launch token)");
+                    }
                     return;
                 }
                 appLoaded = true;
@@ -409,12 +429,11 @@ public class MainActivity extends Activity
         // WebView anyway so a missed signal can never leave the splash up.
         WebView wv = getWebView();
         if (wv != null) {
-            wv.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    dismissSplash();
-                }
-            }, PAINT_FALLBACK_MS);
+            // Single, replaceable backstop: a reload/redirect fires onPageFinished
+            // more than once, and every anonymous Runnable previously stayed queued
+            // on the WebView handler for the life of the view.
+            wv.removeCallbacks(paintFallback);
+            wv.postDelayed(paintFallback, PAINT_FALLBACK_MS);
         } else {
             dismissSplash();
         }
@@ -448,6 +467,9 @@ public class MainActivity extends Activity
                 loadedGeneration = -1;
                 splashDismissed = false;
                 lastStatusKey = null;
+                // A mint queued for the dead document would otherwise fire against
+                // whichever page the replacement WebView finishes loading first.
+                com.dsh.ui.webview.AgyWebViewClient.runAfterNextCoreLoad(null);
                 try {
                     webViewHost = new WebViewHost(MainActivity.this, themeManager, oauthManager,
                             androidBridge, MainActivity.this);
@@ -566,6 +588,13 @@ public class MainActivity extends Activity
         }
         handler.removeCallbacks(splashWatchdog);
         handler.removeCallbacks(statusTicker);
+        // pollServer re-posts itself every 50-1000 ms for the whole activity life;
+        // onDestroy previously left it queued, so a finishing activity kept a
+        // self-perpetuating main-thread task (and its captured Activity) alive.
+        handler.removeCallbacks(pollServer);
+        // A mint queued for a document this activity will never finish loading must
+        // not fire against the next activity's page.
+        com.dsh.ui.webview.AgyWebViewClient.runAfterNextCoreLoad(null);
         if (splash != null) {
             splash.destroy();
         }
@@ -581,6 +610,7 @@ public class MainActivity extends Activity
             WebView wv = webViewHost.getWebView();
             if (wv != null) {
                 try {
+                    wv.removeCallbacks(paintFallback);
                     wv.stopLoading();
                     wv.setWebChromeClient(null);
                     wv.setWebViewClient(null);

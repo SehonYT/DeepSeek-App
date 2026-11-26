@@ -49,7 +49,25 @@ public final class CoreLogWriter {
             return;
         }
         try {
-            log.write(SensitiveDataRedactor.redactLine(line));
+            writeLinePreRedacted(log, SensitiveDataRedactor.redactLine(line));
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Writes a line that the caller already ran through
+     * {@link SensitiveDataRedactor#redactLine}. The core stdout/stderr streamers
+     * redact every line for logcat and the shared ring buffer, then called
+     * writeLine() -- which redacted the same string a second time. That is three
+     * extra regex passes (2 URLs + 3 secret patterns) per log line, on the arm32
+     * target, for output the core emits in bursts during boot.
+     */
+    public static void writeLinePreRedacted(Writer log, String redactedLine) {
+        if (log == null || redactedLine == null) {
+            return;
+        }
+        try {
+            log.write(redactedLine);
             log.write('\n');
             log.flush();
         } catch (Exception ignored) {

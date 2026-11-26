@@ -83,10 +83,20 @@ public final class CoreProcessSupervisor {
 
     public void stop() {
         stopping = true;
-        destroy(process);
         if (worker != null) {
             worker.interrupt();
         }
+        // stop() is called from Service.onDestroy(), i.e. on the MAIN thread.
+        // destroy() also runs killOrphanCoreProcesses(), which walks every
+        // /proc/<pid> entry, reads each cmdline and then sleeps 200ms when it
+        // killed something -- that froze the looper (and the UI) during service
+        // teardown. Kill only this child here, off the main thread; the /proc
+        // sweep still runs on the supervisor/failure paths where it belongs,
+        // and CoreLauncher.launch() sweeps again before each fork anyway.
+        final Process proc = process;
+        Thread killer = new Thread(() -> destroyProcessOnly(proc), "CoreStopThread");
+        killer.setDaemon(true);
+        killer.start();
     }
 
     private void runCore() {
@@ -454,7 +464,9 @@ public final class CoreProcessSupervisor {
                 if (logBuffer != null) {
                     logBuffer.appendLine(safeLine);
                 }
-                CoreLogWriter.writeLine(log, safeLine);
+                // safeLine is already redacted; re-redacting it was two more
+                // regex sweeps per line on the boot critical path.
+                CoreLogWriter.writeLinePreRedacted(log, safeLine);
                 openUrlWatcher.handleStreamLine(line);
             }
         } catch (Exception e) {
@@ -476,7 +488,7 @@ public final class CoreProcessSupervisor {
                 if (logBuffer != null) {
                     logBuffer.append("core", "WARN", "[stderr] " + safeLine);
                 }
-                CoreLogWriter.writeLine(errLog, safeLine);
+                CoreLogWriter.writeLinePreRedacted(errLog, safeLine);
             }
         } catch (Exception e) {
             Log.d(TAG, "stderr stream ended", e);
@@ -495,6 +507,12 @@ public final class CoreProcessSupervisor {
     }
 
     private static void destroy(Process proc) {
+        destroyProcessOnly(proc);
+        CoreLauncher.killOrphanCoreProcesses();
+    }
+
+    /** Kills one child without the /proc-wide orphan sweep (safe on any thread). */
+    private static void destroyProcessOnly(Process proc) {
         if (proc != null) {
             try {
                 proc.destroy();
@@ -505,7 +523,6 @@ public final class CoreProcessSupervisor {
             } catch (Exception ignored) {
             }
         }
-        CoreLauncher.killOrphanCoreProcesses();
     }
 
     private static String getLastLinesFromLog(java.io.File filesDir, int maxLines) {

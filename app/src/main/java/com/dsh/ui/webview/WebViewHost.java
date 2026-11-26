@@ -63,11 +63,18 @@ public final class WebViewHost {
             @Override
             public void onDownloadStart(String url, String userAgent, String contentDisposition,
                                         String mimetype, long contentLength) {
-                if (com.dsh.ui.MainActivity.activeActivity != null) {
-                    com.dsh.ui.download.FileDownloader.handleDownload(
-                            com.dsh.ui.MainActivity.activeActivity, webView, url,
-                            userAgent, contentDisposition, mimetype, contentLength);
+                com.dsh.ui.MainActivity activity = com.dsh.ui.MainActivity.activeActivity;
+                // activeActivity is a static that outlives this WebView: after the
+                // renderer died and the host was replaced, the old view (kept alive by
+                // its own client/listener chains) could still deliver a download to
+                // whatever activity is current. Only a live, non-destroyed view may
+                // hand its own URL to the downloader.
+                if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
+                    return;
                 }
+                com.dsh.ui.download.FileDownloader.handleDownload(
+                        activity, webView, url,
+                        userAgent, contentDisposition, mimetype, contentLength);
             }
         });
     }
@@ -107,8 +114,24 @@ public final class WebViewHost {
         webView.post(new Runnable() {
             @Override
             public void run() {
-                WebSettingsFactory.applyDesktopMode(webView, enabled);
-                webView.reload();
+                try {
+                    WebSettingsFactory.applyDesktopMode(webView, enabled);
+                    // reload() re-runs whatever URL the document currently has. When
+                    // that is still the tokenized entry URL, its 303 re-mints the
+                    // version-1 index cookie under the same cookie name, displacing the
+                    // version-2 operator credential that the Gateway stream and the
+                    // /api/remote.mux upgrade require. Re-minting after the reloaded
+                    // document has finished keeps one desktop-mode toggle from leaving
+                    // the sidebar on "Reconnecting" until the next full restart.
+                    String url = com.dsh.core.CoreRuntimeState.serverUrl;
+                    if (url != null && url.indexOf("token=") >= 0) {
+                        AgyWebViewClient.runAfterNextCoreLoad(
+                                () -> SessionCookiePrimer.mintApiCredentialAfterLoad(context, url));
+                    }
+                    webView.reload();
+                } catch (Throwable t) {
+                    android.util.Log.w("WebViewHost", "desktop mode reload failed: " + t.getMessage());
+                }
             }
         });
     }
