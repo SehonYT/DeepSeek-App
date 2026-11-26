@@ -280,6 +280,120 @@ def apply_mobile_runtime_quick_wins(work_dir: str):
             open(fp, "w", encoding="utf-8").write(src.replace(old_sel, new_sel, 1))
             print(f"[OK] Enabled Android app-UID sandbox passthrough for non-read-only modes in {rel_sbx}.")
 
+    # 6. Coalesce SettingsForms.invalidate() bursts at boot & skip unconditional redactSecrets().
+    settings_dir = os.path.join(work_dir, "packages", "settings", "settings", "lib")
+    if os.path.isdir(settings_dir):
+        inv_re = re.compile(
+            r"invalidate\s*\(\s*\)\s*\{\s*(?:if\s*\(\s*this\.scheduled\s*\|\|\s*this\.closed\s*\)\s*return\s*;\s*this\.scheduled\s*=\s*(?:!0|true)\s*;\s*|this\.scheduled\s*\|\|\s*this\.closed\s*\|\|\s*\(\s*this\.scheduled\s*=\s*(?:!0|true)\s*,\s*)queueMicrotask\s*\(\s*\(\s*\)\s*=>\s*\{(.*?)\}\s*\)\s*;?\s*\)?\s*\}",
+            re.DOTALL,
+        )
+        redact_re = re.compile(
+            r"(?:(?:const|let)\s+|(,))redacted\s*=\s*redactSecrets\(\s*form\s*,\s*value\s*\)\s*;\s*"
+            r"return\s*\[\s*\{\s*"
+            r"autoGenerate\s*,\s*ns\s*:\s*entry\.options\.id\s*,\s*schema\s*:\s*form\.toJSON\(\s*\)\s*,\s*revision\s*,\s*applies\s*:\s*(['\"])live\2\s*,\s*"
+            r"value\s*:\s*options\?\.\s*redactSecrets\s*\?\s*redacted\.value\s*:\s*value\s*,\s*"
+            r"base\s*:\s*options\?\.\s*redactSecrets\s*\?\s*redactSecrets\(\s*form\s*,\s*base\s*\)\.value\s*:\s*base\s*,\s*"
+            r"user\s*:\s*options\?\.\s*redactSecrets\s*\?\s*redactSecrets\(\s*form\s*,\s*user\s*\)\.value\s*:\s*user\s*,\s*"
+            r"\.\.\.\s*options\?\.\s*redactSecrets\s*\?\s*\{\s*secrets\s*:\s*redacted\.secrets\s*\}\s*:\s*\{\s*\}\s*,?\s*"
+            r"\}\s*\]\s*;?"
+        )
+        new_inv = (
+            "invalidate() { if (this.scheduled || this.closed) return; this.scheduled = true; "
+            "const __t = setTimeout(() => { this.scheduled = false; "
+            "if (this.closed || this.ownerContext.fiber.state !== 2) return; "
+            "try { this.describe(); } catch (error) { this.ownerContext.logger.error(error); } }, 50); "
+            "if (__t && typeof __t.unref === 'function') __t.unref(); }"
+        )
+        def _rep_redact(m):
+            prefix = ";" if m.group(1) else ""
+            return (
+                prefix + "if (!options?.redactSecrets) { return [{ autoGenerate, ns: entry.options.id, "
+                "schema: form.toJSON(), revision, applies: 'live', value, base, user }]; } "
+                "const redacted = redactSecrets(form, value); "
+                "return [{ autoGenerate, ns: entry.options.id, schema: form.toJSON(), revision, applies: 'live', "
+                "value: redacted.value, base: redactSecrets(form, base).value, user: redactSecrets(form, user).value, "
+                "secrets: redacted.secrets }];"
+            )
+        for root, _, fs_list in os.walk(settings_dir):
+            for fn in fs_list:
+                if not fn.endswith(".js"):
+                    continue
+                fp = os.path.join(root, fn)
+                src = open(fp, "r", encoding="utf-8").read()
+                out = inv_re.sub(new_inv, src, count=1)
+                out = redact_re.sub(_rep_redact, out, count=1)
+                if out != src:
+                    open(fp, "w", encoding="utf-8").write(out)
+                    print(f"[OK] Coalesced SettingsForms.invalidate() / lazy redactSecrets() in {os.path.relpath(fp, work_dir)}.")
+
+    # 7 & 8. App-boot speedups: persistent NODE_COMPILE_CACHE install-scope cache +
+    #        fast URL/path prefix short-circuit in ResolutionRouter (avoids fileURLToPath + Map bloat).
+    app_boot_dir = os.path.join(work_dir, "packages", "boot", "app-boot", "lib")
+    if os.path.isdir(app_boot_dir):
+        scope_head_re = re.compile(
+            r"function\s+collectInstallationScopePackages\s*\(\s*installAnchor\s*,\s*skippedBundles\s*\)\s*\{"
+        )
+        scope_tail_re = re.compile(
+            r"return\s*\{\s*packageNames\s*:\s*new\s+Set\(\s*links\.keys\(\s*\)\s*\)\s*,\s*packageDirs\s*:\s*links\s*,\s*declarers\s*,\s*versions\s*\}\s*;?"
+        )
+        scope_head_rep = (
+            "function collectInstallationScopePackages(installAnchor, skippedBundles) { "
+            "const __bfs = process.getBuiltinModule('node:fs'); "
+            "const __ccDir = process.env.NODE_COMPILE_CACHE; "
+            "let __ccFile, __st, __skipKey; "
+            "if (__ccDir && __bfs) { try { __st = __bfs.statSync(installAnchor); "
+            "__skipKey = [...skippedBundles].sort().join(','); "
+            "__ccFile = join(__ccDir, 'dsh-install-scope.v1.json'); "
+            "if (__bfs.existsSync(__ccFile)) { "
+            "const __c = JSON.parse(__bfs.readFileSync(__ccFile, 'utf8')); "
+            "if (__c && __c.anchor === installAnchor && __c.mtimeMs === __st.mtimeMs && __c.size === __st.size && __c.skipped === __skipKey) { "
+            "const packageDirs = new Map(__c.links); "
+            "return { packageNames: new Set(packageDirs.keys()), packageDirs, declarers: new Map(__c.declarers), versions: new Map(__c.versions) }; } } } catch {} }"
+        )
+        scope_tail_rep = (
+            "if (__ccFile && __bfs && __st) { try { "
+            "__bfs.mkdirSync(__ccDir, { recursive: true }); "
+            "__bfs.writeFileSync(__ccFile, JSON.stringify({ anchor: installAnchor, mtimeMs: __st.mtimeMs, size: __st.size, skipped: __skipKey, "
+            "links: [...links.entries()], declarers: [...declarers.entries()], versions: [...versions.entries()] })); } catch {} } "
+            "return { packageNames: new Set(links.keys()), packageDirs: links, declarers, versions };"
+        )
+        compile_res_re = re.compile(
+            r"(profilePaths\s*:\s*prefixes\(\s*resolution\.profilesDir\s*\)\s*,\s*profile\s*:\s*resolution\.profileDir\s*===\s*(?:void 0|undefined)\s*\?\s*\[\s*\]\s*:\s*prefixes\(\s*resolution\.profileDir\s*\)\s*,)"
+        )
+        compile_res_rep = (
+            r"\1pathPrefixes:[...prefixes(resolution.profilesDir),...(resolution.profileDir===void 0?[]:prefixes(resolution.profileDir)),...resolution.linkedRoots.flatMap(r=>prefixes(r.realPath))],"
+            r"urlPrefixes:[...prefixes(resolution.profilesDir),...(resolution.profileDir===void 0?[]:prefixes(resolution.profileDir)),...resolution.linkedRoots.flatMap(r=>prefixes(r.realPath))].map(p=>pathToFileURL(p).href),"
+        )
+        esm_route_re = re.compile(
+            r"(getOrCreateParentRoutesForUrl\s*\(\s*parentURL\s*\)\s*\{)"
+        )
+        esm_route_rep = r"\1const __r=this.current;if(__r.urlPrefixes!==void 0&&!startsWithin(parentURL,__r.urlPrefixes))return false;"
+        cjs_route_re = re.compile(
+            r"(routePath\s*\(\s*request\s*,\s*parent\s*,\s*cjs\s*\)\s*\{)"
+        )
+        cjs_route_rep = r"\1const __r=this.current;if(__r.pathPrefixes!==void 0&&!startsWithin(parent,__r.pathPrefixes))return;"
+
+        for root, _, fs_list in os.walk(app_boot_dir):
+            for fn in fs_list:
+                if not fn.endswith(".js"):
+                    continue
+                fp = os.path.join(root, fn)
+                src = open(fp, "r", encoding="utf-8").read()
+                out = src
+                if "dsh-install-scope.v1.json" not in out and scope_head_re.search(out):
+                    out2, n1 = scope_head_re.subn(scope_head_rep, out, count=1)
+                    if n1:
+                        out2, n2 = scope_tail_re.subn(scope_tail_rep, out2, count=1)
+                        if n2:
+                            out = out2
+                if "urlPrefixes" not in out:
+                    out = compile_res_re.sub(compile_res_rep, out, count=1)
+                    out = esm_route_re.sub(esm_route_rep, out, count=1)
+                    out = cjs_route_re.sub(cjs_route_rep, out, count=1)
+                if out != src:
+                    open(fp, "w", encoding="utf-8").write(out)
+                    print(f"[OK] Optimized app-boot resolution/cache in {os.path.relpath(fp, work_dir)}.")
+
 
 def prune_non_runtime_trees(work_dir: str):
     """Drop non-runtime docs, desktop shells, snapshots, and metadata before bundling."""

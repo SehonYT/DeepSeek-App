@@ -23,7 +23,6 @@ const path = _bootRequire("node:path");
 const { fileURLToPath } = _bootRequire("node:url");
 
 const dshRoot = path.resolve(fileURLToPath(import.meta.url), "../../../..");
-const dshRoots = [dshRoot];
 let rpCache = new Map();
 let readCache = new Map();
 let existsCache = new Map();
@@ -34,18 +33,16 @@ const origReadFileSync = fs.readFileSync;
 const origExistsSync = fs.existsSync;
 const origReaddirSync = fs.readdirSync;
 
+let realRoot = "";
 try {
-    const realRoot = origRealpathSync.call(fs, dshRoot);
-    if (realRoot && realRoot !== dshRoot) dshRoots.push(realRoot);
+    const r = origRealpathSync.call(fs, dshRoot);
+    if (r && r !== dshRoot) realRoot = r;
 } catch {
 }
 
-function isUnderDshRoot(p) {
-    for (let i = 0; i < dshRoots.length; i++) {
-        if (p.startsWith(dshRoots[i])) return true;
-    }
-    return false;
-}
+const isUnderDshRoot = realRoot
+    ? (p) => p.startsWith(dshRoot) || p.startsWith(realRoot)
+    : (p) => p.startsWith(dshRoot);
 
 function isUtf8Read(opts) {
     if (opts === "utf8" || opts === "utf-8") return true;
