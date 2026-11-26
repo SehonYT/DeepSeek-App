@@ -14,6 +14,18 @@
 
 No PRoot, chroot, or virtualization overhead. DeepSeek runs **bare-metal inside native Android userspace (Bionic)** powered by an integrated Termux bootloader. Driven by DeepSeek V3 and R1 reasoning models, the agent inspects repositories, authors code across multiple files, compiles binaries, and runs tasks completely on-device.
 
+### App Previews
+
+<p align="center">
+  <a href="docs/assets/preview_1.png"><img src="docs/assets/preview_1.png" width="200" alt="Agent Chat" title="Agent Chat" /></a>
+  <a href="docs/assets/preview_2.png"><img src="docs/assets/preview_2.png" width="200" alt="Workspaces & Sessions" title="Workspaces & Sessions" /></a>
+  <a href="docs/assets/preview_3.png"><img src="docs/assets/preview_3.png" width="200" alt="Integrated Terminal" title="Integrated Terminal" /></a>
+</p>
+
+<p align="center">
+  <sub>Agent Chat &bull; Workspaces &amp; Sessions &bull; Integrated Terminal</sub>
+</p>
+
 ### Architecture
 
 - **App Shell:** Native Android application host (`com.dsh`) with foreground service supervisor and hardware integration.
