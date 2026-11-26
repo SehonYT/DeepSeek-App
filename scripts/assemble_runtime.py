@@ -247,6 +247,18 @@ def bundle_workspace_esm_splitting(work_dir: str, cli_dir: str, esbuild_pkg: str
             continue
         bundled_pkg_dirs.add(rel)
 
+        def is_browser_bundle(filename: str) -> bool:
+            if filename.endswith(".node.js"):
+                return False
+            return (
+                filename == "client.js"
+                or filename.startswith("client.")
+                or filename == "browser.js"
+                or filename.startswith("browser")
+                or filename.endswith(".browser.js")
+                or filename == "typert.remote-client.js"
+            )
+
         def collect(v):
             if isinstance(v, str):
                 p = os.path.normpath(os.path.join(rel, v))
@@ -254,14 +266,13 @@ def bundle_workspace_esm_splitting(work_dir: str, cli_dir: str, esbuild_pkg: str
                 if (
                     "/types/" not in p
                     and p.endswith((".js", ".mjs"))
-                    and bn not in ("client.js", "client.browser.js", "browser.js")
-                    and not bn.endswith(".browser.js")
+                    and not is_browser_bundle(bn)
                     and os.path.isfile(os.path.join(work_dir, p))
                 ):
                     entries.add(p)
             elif isinstance(v, dict):
                 for k, val in v.items():
-                    if k in ("types", "browser") or k.startswith(("./client", "./browser")):
+                    if k in ("types", "browser"):
                         continue
                     collect(val)
 
@@ -394,13 +405,16 @@ console.log("[OK] esbuild --splitting emitted " + Object.keys(result.metafile.ou
             lib_dir = os.path.join(work_dir, rel_pkg, "lib")
             if os.path.isdir(lib_dir):
                 for r, _, fs_list in os.walk(lib_dir):
-                    if "types" in os.path.relpath(r, lib_dir).split(os.sep):
+                    rel_parts = os.path.relpath(r, lib_dir).split(os.sep)
+                    if "types" in rel_parts or "devtools" in rel_parts:
                         continue
                     for fn in fs_list:
                         if (
                             fn.endswith((".js", ".mjs"))
-                            and fn not in ("dsh_boot.mjs", "client.js", "client.browser.js", "browser.js")
-                            and not fn.endswith(".browser.js")
+                            and fn != "dsh_boot.mjs"
+                            and fn != "typert.remote-client.js"
+                            and not (fn == "client.js" or fn.startswith("client.") and not fn.endswith(".node.js"))
+                            and not (fn == "browser.js" or fn.startswith("browser") or fn.endswith(".browser.js"))
                         ):
                             os.remove(os.path.join(r, fn))
         copy_tree_files(out_dir, work_dir)
