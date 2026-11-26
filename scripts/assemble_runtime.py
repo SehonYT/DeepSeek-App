@@ -646,18 +646,57 @@ module.exports.default = module.exports;
     with open(os.path.join(k_dir, "package.json"), "w", encoding="utf-8") as f:
         f.write(koffi_pj)
 
-    print("[*] 5. Installing mobile sharp-wasm32 and @emnapi/runtime...")
+    print("[*] 5. Installing mobile sharp, sharp-wasm32 and @emnapi/runtime...")
     img_dir = os.path.join(root_nm, "@img")
     emnapi_dir = os.path.join(root_nm, "@emnapi")
+    os.makedirs(root_nm, exist_ok=True)
     os.makedirs(img_dir, exist_ok=True)
     os.makedirs(emnapi_dir, exist_ok=True)
-    run(f'curl -sL https://registry.npmjs.org/@img/sharp-wasm32/-/sharp-wasm32-0.35.5.tgz | tar -xz -C "{img_dir}"')
+
+    # The prebuilt archive carries only the compiled dsh packages, never third-party
+    # dependencies. attachment-local (backing read_image and every image upload)
+    # requires the sharp MAIN package plus its wasm32 backend, so install both.
+    # Shipping only the backend left require('sharp') unresolved, which surfaced to
+    # the user as "the bytes do not decode as a supported PNG/JPEG/WebP/GIF image".
+    sharp_dir = os.path.join(root_nm, "sharp")
+    shutil.rmtree(sharp_dir, ignore_errors=True)
+    run('curl -sL https://registry.npmjs.org/sharp/-/sharp-0.35.5.tgz | tar -xz -C "' + root_nm + '"')
+    os.rename(os.path.join(root_nm, "package"), sharp_dir)
+
+    run('curl -sL https://registry.npmjs.org/@img/sharp-wasm32/-/sharp-wasm32-0.35.5.tgz | tar -xz -C "' + img_dir + '"')
     shutil.rmtree(os.path.join(img_dir, "sharp-wasm32"), ignore_errors=True)
     os.rename(os.path.join(img_dir, "package"), os.path.join(img_dir, "sharp-wasm32"))
 
-    run(f'curl -sL https://registry.npmjs.org/@emnapi/runtime/-/runtime-1.11.3.tgz | tar -xz -C "{emnapi_dir}"')
+    run('curl -sL https://registry.npmjs.org/@emnapi/runtime/-/runtime-1.11.3.tgz | tar -xz -C "' + emnapi_dir + '"')
     shutil.rmtree(os.path.join(emnapi_dir, "runtime"), ignore_errors=True)
     os.rename(os.path.join(emnapi_dir, "package"), os.path.join(emnapi_dir, "runtime"))
+
+    # sharp also needs its own runtime dependencies. semver is already part of the
+    # prebuilt tree; detect-libc and @img/colour are not, and without them sharp
+    # throws "Cannot find module 'detect-libc'" the moment it is required.
+    colour_dir = os.path.join(img_dir, "colour")
+    detect_dir = os.path.join(root_nm, "detect-libc")
+    shutil.rmtree(colour_dir, ignore_errors=True)
+    shutil.rmtree(detect_dir, ignore_errors=True)
+    run('curl -sL https://registry.npmjs.org/@img/colour/-/colour-1.1.0.tgz | tar -xz -C "' + img_dir + '"')
+    os.rename(os.path.join(img_dir, "package"), colour_dir)
+    run('curl -sL https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz | tar -xz -C "' + root_nm + '"')
+    os.rename(os.path.join(root_nm, "package"), detect_dir)
+
+    # Fail the bundle stage rather than ship a runtime whose image pipeline is dead.
+    required_members = [
+        (os.path.join(sharp_dir, "package.json"), "sharp/package.json"),
+        (os.path.join(sharp_dir, "dist", "index.cjs"), "sharp/dist/index.cjs"),
+        (os.path.join(img_dir, "sharp-wasm32", "lib",
+                      "sharp-wasm32-0.35.5.node.wasm"), "sharp-wasm32 wasm binary"),
+        (os.path.join(emnapi_dir, "runtime", "index.js"), "@emnapi/runtime entry"),
+        (os.path.join(detect_dir, "package.json"), "detect-libc/package.json"),
+        (os.path.join(colour_dir, "package.json"), "@img/colour/package.json"),
+    ]
+    for member, label in required_members:
+        if not os.path.isfile(member):
+            raise SystemExit("[FATAL] runtime bundle is missing " + label + ": " + member)
+    print("[OK] sharp, sharp-wasm32 and @emnapi/runtime installed and verified.")
 
     print(f"[*] 6. Installing complete node-pty package (arch={target_arch})...")
     node_pty_tmp = tempfile.mkdtemp(prefix="dsh_node_pty_")
