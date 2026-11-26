@@ -471,16 +471,31 @@ public class MainActivity extends Activity
         });
     }
 
+    /**
+     * Reloads the UI at a newly published core URL.
+     *
+     * <p>Goes through {@link WebViewHost#loadApp()} rather than loading the URL
+     * directly, so the same ordering as the first load is preserved: the version-1
+     * index credential is established by the document load, and only then is the
+     * version-2 operator credential minted. Loading the URL directly here would skip
+     * the post-load mint, leaving the Gateway event stream unable to authenticate and
+     * the sidebar stuck on "Reconnecting".</p>
+     */
     public void loadDeepSeekUrl(final String url) {
         handler.post(new Runnable() {
             @Override
             public void run() {
-                if (webViewHost != null && webViewHost.getWebView() != null) {
-                    appLoaded = true;
-                    loadedGeneration = CoreRuntimeState.readyGeneration;
-                    splash.clearFatal();
-                    webViewHost.getWebView().loadUrl(url);
+                if (webViewHost == null || webViewHost.getWebView() == null) {
+                    return;
                 }
+                splash.clearFatal();
+                // loadApp() re-reads CoreRuntimeState.serverUrl, which the caller has
+                // already updated; it performs the prime/mint sequence itself.
+                if (!webViewHost.loadApp()) {
+                    return;
+                }
+                appLoaded = true;
+                loadedGeneration = CoreRuntimeState.readyGeneration;
             }
         });
     }

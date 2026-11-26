@@ -58,7 +58,15 @@ public final class AppLoader {
                 target.loadUrl(url);
             } catch (Throwable t) {
                 Log.w(TAG, "loadUrl failed: " + t.getMessage());
+                return;
             }
+            // Mint the version-2 operator credential only after the document load has
+            // performed its own index exchange: the two credentials share one cookie
+            // name, so minting first would be overwritten. The event stream and the
+            // /api/remote.mux upgrade need the version-2 peer; without it the client's
+            // connection generation never becomes ready and the sidebar stays on
+            // "Reconnecting" even though the page itself renders fine.
+            SessionCookiePrimer.mintApiCredentialAfterLoad(context, url);
         });
         return true;
     }
