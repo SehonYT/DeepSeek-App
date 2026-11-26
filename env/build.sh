@@ -52,12 +52,12 @@ build_bootstrap_tar() {
         curl -sSL "https://github.com/termux/termux-packages/releases/download/bootstrap-2026.11.15-r1%2Bapt.android-7/bootstrap-aarch64.zip" -o "$zip" || true
     fi
     [ -f "$zip" ] || { log "missing $zip"; return 1; }
-    log "Resolving 64-bit ARM nodejs, sqlite, and git packages..."
+    log "Resolving 64-bit ARM nodejs, sqlite, git, and ripgrep packages..."
     python3 "$ENV_DIR/scripts/fetch_termux_debs.py" \
         --arch aarch64 \
         --bootstrap-zip "$zip" \
         --out-dir "$deb_dir" \
-        nodejs sqlite git || true
+        nodejs sqlite git ripgrep || true
     local extra_args=()
     for deb in "$ENV_DIR/packages"/*.deb "$deb_dir"/*.deb; do
         [ -f "$deb" ] && extra_args+=("--extra-deb" "$deb")
@@ -76,12 +76,12 @@ build_bootstrap_arm_tar() {
         curl -sSL "https://github.com/termux/termux-packages/releases/download/bootstrap-2026.11.15-r1%2Bapt.android-7/bootstrap-arm.zip" -o "$zip" || true
     fi
     [ -f "$zip" ] || { log "missing $zip"; return 1; }
-    log "Resolving 32-bit ARM nodejs, sqlite, and git packages..."
+    log "Resolving 32-bit ARM nodejs, sqlite, git, and ripgrep packages..."
     python3 "$ENV_DIR/scripts/fetch_termux_debs.py" \
         --arch arm \
         --bootstrap-zip "$zip" \
         --out-dir "$deb_dir" \
-        nodejs sqlite git
+        nodejs sqlite git ripgrep
     local extra_args=()
     for deb in "$deb_dir"/*.deb; do
         [ -f "$deb" ] && extra_args+=("--extra-deb" "$deb")
@@ -103,8 +103,8 @@ build_bootstrap_x86_tar() {
         curl -sSL "https://github.com/termux/termux-packages/releases/download/bootstrap-2026.11.15-r1%2Bapt.android-7/$zipname" -o "$zip" || true
     fi
     [ -f "$zip" ] || { log "missing $zip"; return 1; }
-    log "Resolving $termux_arch nodejs, sqlite, and git packages..."
-    python3 "$ENV_DIR/scripts/fetch_termux_debs.py"         --arch "$termux_arch"         --bootstrap-zip "$zip"         --out-dir "$deb_dir"         nodejs sqlite git || true
+    log "Resolving $termux_arch nodejs, sqlite, git, and ripgrep packages..."
+    python3 "$ENV_DIR/scripts/fetch_termux_debs.py"         --arch "$termux_arch"         --bootstrap-zip "$zip"         --out-dir "$deb_dir"         nodejs sqlite git ripgrep || true
     local extra_args=()
     for deb in "$ENV_DIR/packages"/*.deb "$deb_dir"/*.deb; do
         [ -f "$deb" ] && extra_args+=("--extra-deb" "$deb")
@@ -117,9 +117,13 @@ bootstrap_arm_has_node() {
     local ext="${1:-tar.gz}"
     local out="$ENV_DIR/bootstrap/bootstrap-arm.${ext}"
     if [ "$ext" = "tar.zst" ]; then
-        [ -f "$out" ] && command -v zstd >/dev/null 2>&1 && (zstd -d -c "$out" 2>/dev/null | tar -tf - ./bin/node >/dev/null 2>&1 || zstd -d -c "$out" 2>/dev/null | tar -tf - bin/node >/dev/null 2>&1)
+        [ -f "$out" ] && command -v zstd >/dev/null 2>&1 \
+            && (zstd -d -c "$out" 2>/dev/null | tar -tf - ./bin/node >/dev/null 2>&1 || zstd -d -c "$out" 2>/dev/null | tar -tf - bin/node >/dev/null 2>&1) \
+            && (zstd -d -c "$out" 2>/dev/null | tar -tf - ./bin/rg >/dev/null 2>&1 || zstd -d -c "$out" 2>/dev/null | tar -tf - bin/rg >/dev/null 2>&1)
     else
-        [ -f "$out" ] && (tar -tzf "$out" ./bin/node >/dev/null 2>&1 || tar -tzf "$out" bin/node >/dev/null 2>&1)
+        [ -f "$out" ] \
+            && (tar -tzf "$out" ./bin/node >/dev/null 2>&1 || tar -tzf "$out" bin/node >/dev/null 2>&1) \
+            && (tar -tzf "$out" ./bin/rg >/dev/null 2>&1 || tar -tzf "$out" bin/rg >/dev/null 2>&1)
     fi
 }
 

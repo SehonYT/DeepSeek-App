@@ -35,7 +35,7 @@ public final class ShellBridgeInstaller {
     /** Records which prefix the bulk bridges were generated for. Bump when the
      *  bridge script format changes so a warm launch regenerates them once. */
     private static final String BRIDGE_MARKER = ".agy-bridges";
-    public static final int BRIDGE_FORMAT = 4;
+    public static final int BRIDGE_FORMAT = 5;
 
     private ShellBridgeInstaller() {
     }
@@ -135,7 +135,8 @@ public final class ShellBridgeInstaller {
         if (!force && markerMatches(marker, prefix, toolCount)
                 && new File(bin, "bash").canExecute()
                 && new File(bin, "xdg-open").canExecute()
-                && new File(bin, "torch").canExecute()) {
+                && new File(bin, "torch").canExecute()
+                && (!new File(prefix, "bin/rg").isFile() || new File(bin, "rg").canExecute())) {
             return;
         }
         // Refresh fallback shells and shims before generating bionic bridges

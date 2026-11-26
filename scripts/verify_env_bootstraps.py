@@ -6,7 +6,7 @@ REQUIRED_GZIP = {
     "env/bootstrap/bootstrap-x86.tar.gz": ("x86",),
     "env/bootstrap/bootstrap-x86_64.tar.gz": ("x86_64",),
 }
-REQUIRED = ("bin/bash", "bin/node", "bin/pkg", "lib/libtermux-exec.so")
+REQUIRED = ("bin/bash", "bin/node", "bin/pkg", "bin/rg", "lib/libtermux-exec.so")
 
 def check_gzip(path):
     with tarfile.open(path) as t:

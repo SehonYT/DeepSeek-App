@@ -113,6 +113,7 @@ public final class CoreLauncher {
             final Context ctxForEnv = context;
             final RuntimeManager rmForCore = runtime;
             final Throwable[] envFailure = new Throwable[1];
+            final boolean[] envUpdated = new boolean[1];
             // The runtime extract is REQUIRED (node cannot start without
             // dsh/apps/cli/lib/bin.js). Before, an exception inside installCore()
             // was uncaught on this helper thread: it died silently, join()
@@ -139,10 +140,14 @@ public final class CoreLauncher {
 
             long tEnv = SystemClock.elapsedRealtime();
             coreThread.start();
-            if (!EnvInstaller.isInstalled(ctxForEnv)) {
-                Log.i(TAG, "First boot: installing Bionic userspace (in parallel with runtime extract)...");
+            String installedEnvIdBefore = EnvInstaller.readInstalledBundleId(ctxForEnv);
+            boolean envNeedsUpdate = !EnvInstaller.isInstalled(ctxForEnv)
+                    || (!envBundleId.isEmpty() && !envBundleId.equals(installedEnvIdBefore))
+                    || !new File(prefix, "bin/rg").isFile();
+            if (envNeedsUpdate) {
+                Log.i(TAG, "Installing/updating Bionic userspace (in parallel with runtime extract)...");
                 try {
-                    EnvInstaller.install(ctxForEnv);
+                    envUpdated[0] = EnvInstaller.install(ctxForEnv);
                 } catch (Throwable e) {
                     envFailure[0] = e;
                     Log.e(TAG, "userspace install failed; continuing with runtime only: "
@@ -159,6 +164,10 @@ public final class CoreLauncher {
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 throw new IOException("interrupted waiting for runtime extract", ie);
+            }
+            if (envUpdated[0] || (new File(prefix, "bin/rg").isFile()
+                    && !new File(runtime.getBinDir(), "rg").canExecute())) {
+                ShellBridgeInstaller.install(runtime, envUpdated[0]);
             }
             if (coreFailure[0] != null) {
                 // Fail closed with the real reason instead of forking node

@@ -501,12 +501,12 @@ console.log("[OK] esbuild --splitting emitted " + Object.keys(result.metafile.ou
 
     # Prune bundled third-party packages from node_modules/ while keeping @deepseek-ai
     # and the full dependency closure of runtime-resolved/native/externalized packages
-    # (sharp + detect-libc + semver + @img + @emnapi, undici, node-pty, koffi, open, @xterm).
+    # (sharp + detect-libc + semver + @img + @emnapi, undici, node-pty, koffi, @vscode/ripgrep, open, @xterm).
     root_nm = os.path.join(work_dir, "node_modules")
     cli_nm = os.path.join(cli_dir, "node_modules")
     keep_top = _kept_node_modules_closure(
         root_nm,
-        {"@deepseek-ai", "node-pty", "koffi", "@img", "@emnapi", "sharp", "detect-libc", "semver", "undici", "open", "@xterm"},
+        {"@deepseek-ai", "node-pty", "koffi", "@vscode", "@img", "@emnapi", "sharp", "detect-libc", "semver", "undici", "open", "@xterm"},
     )
     pruned = 0
     for item in os.listdir(root_nm):
@@ -782,6 +782,163 @@ def prune_boot_dead_packages(work_dir: str) -> None:
           f"{rows_removed} broken plugin rows.")
 
 
+def install_android_ripgrep_shim(root_nm: str) -> None:
+    """Install @vscode/ripgrep resolver + .bin/rg link targeting Android's bundled rg."""
+    rg_pkg_dir = os.path.join(root_nm, "@vscode", "ripgrep")
+    rg_bin_dir = os.path.join(rg_pkg_dir, "bin")
+    root_dot_bin = os.path.join(root_nm, ".bin")
+    shutil.rmtree(rg_pkg_dir, ignore_errors=True)
+    os.makedirs(rg_bin_dir, exist_ok=True)
+    os.makedirs(root_dot_bin, exist_ok=True)
+
+    resolver_cjs = """const fs = require("node:fs");
+const path = require("node:path");
+
+const SELF_BIN_REAL = (() => {
+  try {
+    return fs.realpathSync(path.join(__dirname, "bin", "rg"));
+  } catch {
+    return path.join(__dirname, "bin", "rg");
+  }
+})();
+
+let cachedPath = null;
+
+function isExecutableFile(candidate) {
+  if (!candidate) return false;
+  try {
+    const resolved = fs.realpathSync(candidate);
+    if (resolved === SELF_BIN_REAL) return false;
+    fs.accessSync(resolved, fs.constants.X_OK);
+    return fs.statSync(resolved).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function resolveRgPath() {
+  if (cachedPath && isExecutableFile(cachedPath)) {
+    return cachedPath;
+  }
+  const candidates = [];
+  if (process.env.DSH_RG_PATH) {
+    candidates.push(process.env.DSH_RG_PATH);
+  }
+  const prefix = process.env.PREFIX;
+  if (prefix) {
+    // Prefer the runtime/bin/rg bridge so LD_LIBRARY_PATH=$PREFIX/lib is preserved
+    // even when a caller scrubs environment variables before exec.
+    candidates.push(path.join(path.dirname(prefix), "runtime", "bin", "rg"));
+    candidates.push(path.join(prefix, "bin", "rg"));
+  }
+  const xdgDataDirs = process.env.XDG_DATA_DIRS;
+  if (xdgDataDirs) {
+    for (const dir of xdgDataDirs.split(path.delimiter)) {
+      if (dir) candidates.push(path.join(dir, "bin", "rg"));
+    }
+  }
+  const pathEnv = process.env.PATH || "";
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (dir) candidates.push(path.join(dir, "rg"));
+  }
+  for (const candidate of candidates) {
+    if (isExecutableFile(candidate)) {
+      cachedPath = candidate;
+      return candidate;
+    }
+  }
+  throw new Error("ripgrep (rg) binary not found in DSH_RG_PATH, PREFIX, or PATH");
+}
+
+module.exports = { resolveRgPath };
+"""
+
+    index_cjs = """const { resolveRgPath } = require("./resolver.cjs");
+
+module.exports = {
+  resolveRgPath,
+  get rgPath() {
+    return resolveRgPath();
+  },
+};
+module.exports.default = module.exports;
+"""
+
+    index_mjs = """import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const { resolveRgPath } = require("./resolver.cjs");
+
+export { resolveRgPath };
+export const rgPath = resolveRgPath();
+export default { rgPath, resolveRgPath };
+"""
+
+    bin_rg = """#!/system/bin/sh
+if [ -n "${DSH_RG_PATH:-}" ] && [ -x "$DSH_RG_PATH" ]; then
+  exec "$DSH_RG_PATH" "$@"
+fi
+if [ -n "${PREFIX:-}" ]; then
+  BRIDGE_RG="$(dirname "$PREFIX")/runtime/bin/rg"
+  if [ -x "$BRIDGE_RG" ]; then
+    exec "$BRIDGE_RG" "$@"
+  fi
+  if [ -x "$PREFIX/bin/rg" ]; then
+    export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    exec "$PREFIX/bin/rg" "$@"
+  fi
+fi
+OLD_IFS="$IFS"
+IFS=":"
+for dir in ${PATH:-}; do
+  case "$dir" in
+    ""|*/node_modules/.bin|*/@vscode/ripgrep/bin) continue ;;
+  esac
+  if [ -x "$dir/rg" ]; then
+    IFS="$OLD_IFS"
+    exec "$dir/rg" "$@"
+  fi
+done
+IFS="$OLD_IFS"
+echo "rg: ripgrep binary not found" >&2
+exit 127
+"""
+
+    pkg_json = {
+        "name": "@vscode/ripgrep",
+        "version": "1.17.1-android",
+        "main": "index.cjs",
+        "module": "index.js",
+        "exports": {
+            ".": {
+                "import": "./index.js",
+                "require": "./index.cjs",
+                "default": "./index.js",
+            }
+        },
+        "bin": {"rg": "bin/rg"},
+    }
+
+    with open(os.path.join(rg_pkg_dir, "package.json"), "w", encoding="utf-8") as f:
+        json.dump(pkg_json, f, indent=2)
+    with open(os.path.join(rg_pkg_dir, "resolver.cjs"), "w", encoding="utf-8") as f:
+        f.write(resolver_cjs)
+    with open(os.path.join(rg_pkg_dir, "index.cjs"), "w", encoding="utf-8") as f:
+        f.write(index_cjs)
+    with open(os.path.join(rg_pkg_dir, "index.js"), "w", encoding="utf-8") as f:
+        f.write(index_mjs)
+    bin_rg_path = os.path.join(rg_bin_dir, "rg")
+    with open(bin_rg_path, "w", encoding="utf-8") as f:
+        f.write(bin_rg)
+    os.chmod(bin_rg_path, 0o755)
+
+    dot_bin_rg = os.path.join(root_dot_bin, "rg")
+    if os.path.lexists(dot_bin_rg):
+        os.unlink(dot_bin_rg)
+    os.symlink(os.path.join("..", "@vscode", "ripgrep", "bin", "rg"), dot_bin_rg)
+    print("[OK] Installed Android @vscode/ripgrep resolver shim and node_modules/.bin/rg link.")
+
+
 def normalize_arch(arch: str) -> str:
     val = (arch or "universal").strip().lower()
     if val in ("universal", "all", "fat"):
@@ -1012,6 +1169,8 @@ module.exports.default = module.exports;
     with open(os.path.join(k_dir, "package.json"), "w", encoding="utf-8") as f:
         f.write(koffi_pj)
 
+    install_android_ripgrep_shim(root_nm)
+
     print("[*] 5. Installing mobile sharp, sharp-wasm32 and @emnapi/runtime...")
     img_dir = os.path.join(root_nm, "@img")
     emnapi_dir = os.path.join(root_nm, "@emnapi")
@@ -1058,6 +1217,9 @@ module.exports.default = module.exports;
         (os.path.join(emnapi_dir, "runtime", "index.js"), "@emnapi/runtime entry"),
         (os.path.join(detect_dir, "package.json"), "detect-libc/package.json"),
         (os.path.join(colour_dir, "package.json"), "@img/colour/package.json"),
+        (os.path.join(root_nm, "@vscode", "ripgrep", "package.json"), "@vscode/ripgrep/package.json"),
+        (os.path.join(root_nm, "@vscode", "ripgrep", "index.js"), "@vscode/ripgrep/index.js"),
+        (os.path.join(root_nm, "@vscode", "ripgrep", "index.cjs"), "@vscode/ripgrep/index.cjs"),
     ]
     for member, label in required_members:
         if not os.path.isfile(member):
