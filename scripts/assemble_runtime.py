@@ -178,7 +178,7 @@ def apply_mobile_runtime_quick_wins(work_dir: str):
             updated = updated.replace(old_tasks, new_tasks, 1)
             print("[OK] Patched Loader EntryTree.getTasks() to avoid recursive generator spreads.")
         entries_re = re.compile(
-            r"\t\*entries\(\)\s*\{\s*for\s*\(\s*(?:const|let)\s+entry\s+of\s+Object\.values\(this\.store\)\s*\)\s*\{\s*yield\s+entry;\s*if\s*\(entry\.subtree\)\s*yield\*\s*entry\.subtree\.entries\(\);\s*\}\s*\}"
+            r"\t\*entries\(\)\s*\{\s*for\s*\(\s*(?:const|let)\s+entry\s+of\s+Object\.values\(this\.store\)\s*\)\s*\{\s*yield\s+entry;?\s*(?:if\s*\(entry\.subtree\)\s*(?:\{\s*)?yield\*\s*entry\.subtree\.entries\(\);?\s*(?:\}\s*)?|if\s*\(\s*!entry\.subtree\s*\)\s*continue;?\s*yield\*\s*entry\.subtree\.entries\(\);?\s*)\}\s*\}"
         )
         new_entries = (
             '\t*entries() {\n'
@@ -230,6 +230,7 @@ def apply_mobile_runtime_quick_wins(work_dir: str):
     # 5. Android sandbox compatibility: Android app-UID isolation replaces bwrap/landlock,
     #    and $PREFIX/$HOME/$TMPDIR must stay writable for package installs even in workspace-write.
     for rel_roots in (
+        os.path.join("packages", "sandbox", "sandbox", "lib", "index.js"),
         os.path.join("packages", "sandbox", "sandbox", "lib", "roots.js"),
         os.path.join("packages", "sandbox", "sandbox", "lib", "types", "roots.js"),
     ):
@@ -237,17 +238,20 @@ def apply_mobile_runtime_quick_wins(work_dir: str):
         if not os.path.isfile(fp):
             continue
         src = open(fp, "r", encoding="utf-8").read()
-        if "process.platform === 'android'" in src:
+        if "process.platform === 'android'" in src or 'process.platform==="android"' in src:
             continue
-        old_wr = "return [...new Set([...workspaceWritableRoots(policy), canonicalPath('/tmp'), canonicalPath(tmpdir())])];"
+        wr_re = re.compile(
+            r"return\s*\[\s*\.\.\.\s*new\s+Set\s*\(\s*\[\s*\.\.\.\s*workspaceWritableRoots\(\s*policy\s*\)\s*,\s*canonicalPath\(\s*(['\"])/tmp\1\s*\)\s*,\s*canonicalPath\(\s*tmpdir\(\)\s*\)\s*\]\s*\)\s*\]\s*;?"
+        )
         new_wr = (
             "const extra = process.platform === 'android'\n"
             "        ? [process.env.PREFIX, process.env.HOME, process.env.TMPDIR].filter(Boolean).map(canonicalPath)\n"
             "        : [];\n"
             "    return [...new Set([...workspaceWritableRoots(policy), canonicalPath('/tmp'), canonicalPath(tmpdir()), ...extra])];"
         )
-        if old_wr in src:
-            open(fp, "w", encoding="utf-8").write(src.replace(old_wr, new_wr, 1))
+        updated_wr, n_wr = wr_re.subn(new_wr, src, count=1)
+        if n_wr:
+            open(fp, "w", encoding="utf-8").write(updated_wr)
             print(f"[OK] Added Android writableRoots ($PREFIX/$HOME/$TMPDIR) in {rel_roots}.")
 
     for rel_sbx in (
