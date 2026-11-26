@@ -388,6 +388,7 @@ const result = await esbuild.build({
     "@opentelemetry/resources",
     "@opentelemetry/sdk-logs",
     "@browserbasehq/stagehand",
+    "@xterm/*",
     "playwright",
     "playwright-core",
     "chromium-bidi",
@@ -424,7 +425,7 @@ console.log("[OK] esbuild --splitting emitted " + Object.keys(result.metafile.ou
     # Prune bundled third-party packages from node_modules/ (keep @deepseek-ai + runtime-resolved/native externals)
     root_nm = os.path.join(work_dir, "node_modules")
     cli_nm = os.path.join(cli_dir, "node_modules")
-    keep_top = {"@deepseek-ai", "node-pty", "koffi", "@img", "@emnapi", "open"}
+    keep_top = {"@deepseek-ai", "node-pty", "koffi", "@img", "@emnapi", "open", "@xterm"}
     pruned = 0
     for item in os.listdir(root_nm):
         if item in keep_top or item.startswith("."):
