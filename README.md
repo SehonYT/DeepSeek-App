@@ -16,22 +16,24 @@ No PRoot, chroot, or virtualization overhead. DeepSeek runs **bare-metal inside 
 
 ### App Previews
 
-<p align="center">
-  <a href="docs/assets/preview_1.png"><img src="docs/assets/preview_1.png" width="220" alt="Agent Chat" title="Agent Chat" /></a>
-  <a href="docs/assets/preview_2.png"><img src="docs/assets/preview_2.png" width="220" alt="Workspaces & Sessions" title="Workspaces & Sessions" /></a>
-</p>
-
-<p align="center">
-  <sub>Agent Chat &bull; Workspaces &amp; Sessions</sub>
-</p>
-
-<p align="center">
-  <a href="docs/assets/preview_3.png"><img src="docs/assets/preview_3.png" width="220" alt="Integrated Terminal" title="Integrated Terminal" /></a>
-</p>
-
-<p align="center">
-  <sub>Integrated Terminal</sub>
-</p>
+<table align="center">
+  <tr>
+    <td align="center">
+      <a href="docs/assets/preview_1.png"><img src="docs/assets/preview_1.png" width="240" alt="Agent Chat" title="Agent Chat" /></a><br/>
+      <sub>Agent Chat</sub>
+    </td>
+    <td align="center">
+      <a href="docs/assets/preview_2.png"><img src="docs/assets/preview_2.png" width="240" alt="Workspaces & Sessions" title="Workspaces & Sessions" /></a><br/>
+      <sub>Workspaces &amp; Sessions</sub>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <a href="docs/assets/preview_3.png"><img src="docs/assets/preview_3.png" width="240" alt="Integrated Terminal" title="Integrated Terminal" /></a><br/>
+      <sub>Integrated Terminal</sub>
+    </td>
+  </tr>
+</table>
 
 ### Architecture
 
