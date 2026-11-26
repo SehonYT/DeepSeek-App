@@ -62,8 +62,18 @@ public final class AppLoader {
             // becomes ready and the sidebar stays on "Reconnecting" even though the
             // page itself renders fine. onPageFinished is the only point that is
             // guaranteed to be after that exchange, so the mint is queued there.
-            AgyWebViewClient.runAfterNextCoreLoad(
-                    () -> SessionCookiePrimer.mintApiCredentialAfterLoad(context, url));
+            // Mint twice on purpose. The first mint runs from onPageFinished, i.e. after
+            // the document's own Set-Cookie has been committed. A second, delayed mint
+            // covers the two ways that can still be too early: a WebView that reports
+            // the intermediate redirect rather than the final document, and page
+            // scripts that open the Gateway socket before the jar write settles. The
+            // client reconnects with exponential backoff, so an early socket attempt
+            // simply retries; by then the operator credential is present.
+            Runnable mint = () -> SessionCookiePrimer.mintApiCredentialAfterLoad(context, url);
+            AgyWebViewClient.runAfterNextCoreLoad(mint);
+            target.postDelayed(() -> {
+                SessionCookiePrimer.mintApiCredentialAfterLoad(context, url);
+            }, 2500L);
             try {
                 target.loadUrl(url);
             } catch (Throwable t) {
