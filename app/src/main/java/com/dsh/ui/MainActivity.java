@@ -546,6 +546,13 @@ public class MainActivity extends Activity
         if (webViewHost != null) {
             AppLifecycle.pause(webViewHost.getWebView());
         }
+        // Persist the core's session cookie. Without this the cookie lives only in
+        // memory, so a cold restart of the process repeats the whole token handshake
+        // (and any window where the cookie is missing shows "Reconnecting").
+        try {
+            android.webkit.CookieManager.getInstance().flush();
+        } catch (Throwable ignored) {
+        }
         super.onPause();
     }
 

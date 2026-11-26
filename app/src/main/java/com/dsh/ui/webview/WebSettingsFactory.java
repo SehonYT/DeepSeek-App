@@ -48,8 +48,16 @@ public final class WebSettingsFactory {
         settings.setAllowFileAccessFromFileURLs(false);
         settings.setAllowUniversalAccessFromFileURLs(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        // The core's token authentication works by setting a session cookie in
+        // response to GET /?token=...; every later API request and the WebSocket
+        // upgrade authenticate with that cookie. Accepting third-party cookies is
+        // not the same switch: the first-party accept policy must be on too, or the
+        // cookie is silently dropped, the socket handshake is rejected, and the UI
+        // sits on "Reconnecting".
+        CookieManager cookieManager = CookieManager.getInstance();
+        cookieManager.setAcceptCookie(true);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            CookieManager.getInstance().setAcceptThirdPartyCookies(view, true);
+            cookieManager.setAcceptThirdPartyCookies(view, true);
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             settings.setSafeBrowsingEnabled(true);
