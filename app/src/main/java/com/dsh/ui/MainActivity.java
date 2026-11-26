@@ -202,7 +202,9 @@ public class MainActivity extends Activity
         }
         if (!appLoaded && CoreRuntimeState.serverUrl == null && !splash.isFatalShown()
                 && bootElapsedMs() > splashDeadlineBudgetMs()) {
-            splash.showFatalError("core did not start within "
+            // Route through showFatalError() so the reason is also written to the
+            // Termux-readable probe file; the splash alone is not diagnosable.
+            showFatalError("core did not start within "
                     + (splashDeadlineBudgetMs() / 1000) + "s");
         }
     }
@@ -351,6 +353,12 @@ public class MainActivity extends Activity
     /** Keep the splash visible and replace it with a readable failure message. */
     public void showFatalError(String message) {
         splash.showFatalError(message);
+        // Persist the failure where a desktop shell can read it, without the user
+        // having to find the export button on a screen that may be unreadable.
+        try {
+            com.dsh.ui.webview.NetProbe.record(this, "fatal", false, -1, -1L, message);
+        } catch (Throwable ignored) {
+        }
     }
 
     /** Retry re-runs install + start: stop the service, then start it again. */
@@ -437,6 +445,10 @@ public class MainActivity extends Activity
                 + bootElapsedMs() + "ms, ui_load_to_paint=" + paintDelayMs + "ms)");
         splash.dismiss();
         BootMetrics.markUiPaint();
+        // Record what the backend actually answered. A UI that renders but cannot
+        // authenticate looks identical to a dead core from inside the WebView; the
+        // probe writes the truth to a Termux-readable file for the next report.
+        com.dsh.ui.webview.BackendHealthCheck.probeAfterUiLoaded(this);
     }
 
     public WebView getWebView() {

@@ -194,12 +194,35 @@ public final class AgyWebViewClient extends WebViewClient {
                 Uri uri = Uri.parse(url);
                 if (TrustedCoreOrigin.matches(uri, bridge.getEnginePort())) {
                     injectTrustedHelpers(v);
+                    probePageConnectivity(v);
                 }
             } catch (Exception ignored) {
             }
         }
         if (listener != null) {
             listener.onPageFinished(url);
+        }
+    }
+
+    /**
+     * Asks the page itself whether the authenticated API answers. The native side
+     * can reach the core while the page still cannot (missing cookie, wrong
+     * origin), and that difference is invisible from either side alone.
+     */
+    private void probePageConnectivity(WebView v) {
+        String js = "(function(){try{"
+                + "var done=function(s){try{if(window.Android&&window.Android.onPageProbe){"
+                + "window.Android.onPageProbe(String(s));}}catch(e){}};"
+                + "var base=document.baseURI||'';"
+                + "var info='base='+base+';cookie='+(document.cookie?'present':'empty')+';';"
+                + "fetch('api',{method:'GET',credentials:'include',cache:'no-store'})"
+                + ".then(function(r){return r.text().then(function(t){"
+                + "done(info+'fetch_api='+r.status+' body='+String(t).slice(0,160));});})"
+                + ".catch(function(e){done(info+'fetch_error='+(e&&e.message?e.message:e));});"
+                + "}catch(e){}})();";
+        try {
+            v.evaluateJavascript(js, null);
+        } catch (Throwable ignored) {
         }
     }
 

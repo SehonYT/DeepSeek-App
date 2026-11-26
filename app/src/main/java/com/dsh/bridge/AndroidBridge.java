@@ -49,6 +49,23 @@ public final class AndroidBridge {
         }
     }
 
+    /**
+     * Receives the in-page connectivity probe result. Not authenticated: it reports
+     * diagnostics only and never mutates app state, and its content is sanitized
+     * before it reaches the log.
+     */
+    @JavascriptInterface
+    public void onPageProbe(String info) {
+        android.content.Context ctx = activityRef != null && activityRef.get() != null
+                ? activityRef.get() : activityRef == null ? null : activityRef.get();
+        android.content.Context app = ctx != null ? ctx.getApplicationContext() : null;
+        if (app != null) {
+            com.dsh.ui.webview.NetProbe.record(app, "page", false, -1, -1L, info);
+        } else {
+            android.util.Log.i("PageProbe", String.valueOf(info));
+        }
+    }
+
     @JavascriptInterface
     public void openDirectoryPicker() {
         final MainActivity act = activityRef != null ? activityRef.get() : MainActivity.activeActivity;
